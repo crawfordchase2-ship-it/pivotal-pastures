@@ -9,7 +9,7 @@ export function useSettings() {
 
   useEffect(() => {
     if (!user) return
-    supabase.from('app_settings').select('*').eq('user_id', user.id).single()
+    supabase.from('app_settings').select('*').eq('user_id', user.id).maybeSingle()
       .then(({ data }) => {
         if (data) {
           setSettings({
