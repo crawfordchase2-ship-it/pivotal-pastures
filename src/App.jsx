@@ -12,6 +12,9 @@ import RotationsTab     from './components/RotationsTab'
 import ReportsTab       from './components/ReportsTab'
 import SettingsTab      from './components/SettingsTab'
 
+// ── App version ──────────────────────────────────────────────────────────────
+const APP_VERSION = 'v1.0.3'
+
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
   { id: 'map',       label: 'Field Map', icon: '🗺' },
@@ -112,6 +115,19 @@ export default function App() {
           ))}
         </div>
       )}
+    {/* Version badge */}
+      <div style={{
+        position: 'fixed', bottom: 70, right: 8,
+        background: 'rgba(46,77,28,0.85)',
+        border: '1px solid var(--bark2)',
+        borderRadius: 5, padding: '2px 7px',
+        fontFamily: 'DM Mono, monospace',
+        fontSize: '0.55rem', color: 'var(--subtext)',
+        zIndex: 50, backdropFilter: 'blur(4px)',
+        pointerEvents: 'none',
+      }}>
+        {APP_VERSION}
+      </div>
     </div>
   )
 }
