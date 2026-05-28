@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase'
 const AuthContext = createContext({})
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null)
+  const [user, setUser]       = useState(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -24,8 +24,14 @@ export function AuthProvider({ children }) {
       options: { redirectTo: window.location.origin }
     })
 
-  const signInWithEmail = (email, password) =>
-    supabase.auth.signInWithPassword({ email, password })
+  const signInWithEmail = (email, password, remember = true) =>
+    supabase.auth.signInWithPassword({
+      email, password,
+      options: {
+        // 30 days if remember me, otherwise session only
+        expiresIn: remember ? 60 * 60 * 24 * 30 : undefined,
+      }
+    })
 
   const signUpWithEmail = (email, password) =>
     supabase.auth.signUp({ email, password })
