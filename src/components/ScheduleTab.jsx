@@ -1,74 +1,122 @@
 import { useState, useEffect } from 'react'
-import { useMachines, useHerds, useSchedules } from '../hooks/useData'
-import { calcSchedule, fetchSunTimes } from '../lib/grazing'
-
-const empty = {
-  date: new Date().toISOString().slice(0, 10),
-  machine_id: '', herd_id: '', spans_grazed: 1,
-  ipm: 25, moves_per_rotation: 6, move_dist: 50,
-  sunrise_time: '06:00', sunset_time: '20:30',
-  goal: 'production', post_graze_residual: '',
-  notes: '', observations: '',
-}
-
-const ACTION_COLORS = {
-  add_move:      'var(--sage)',
-  hold:          'var(--sky)',
-  remove_move:   'var(--amber)',
-  adjust_timing: 'var(--straw)',
-  flag_risk:     'var(--rust)',
-}
+import { useMachines, useHerds, useSchedules, useGrazingPlans, usePasses } from '../hooks/useData'
+import {
+  calcPivotPass, calcLinearPass, calcTargetAcresPerDay,
+  generateMoveSchedule, applyManualOverride,
+  fetchSunTimes, getEndTowerRadius, behaviorLabel,
+  toMins, minsToTime24, fmt12,
+} from '../lib/grazing'
 
 const BG_MAP = {
   'Morning graze': '#0a1a2a',
-  'Midday loaf':   '#2a1a00',
-  'Transition':    '#2a2010',
-  'Evening intake':'#0a2010',
+  'Midday loaf':   '#1a1800',
+  'Transition':    '#1a1500',
+  'Evening intake':'#0a1a08',
 }
 
 function residualHint(r) {
   if (!r) return null
   const v = parseFloat(r)
-  if (v < 4)  return { color: 'var(--rust)',   text: '⬆ Add one move — residual below 4"' }
-  if (v <= 5) return { color: 'var(--straw)',  text: '✓ Hold — residual 4–5"' }
-  if (v <= 7) return { color: 'var(--amber)',  text: '⬇ Remove one move — residual 6–7"' }
-  return            { color: 'var(--sage)',    text: '🌿 Topping target — residual 8–9"' }
+  if (v < 4)  return { color: 'var(--alert)',   text: '⬆ Add one move — residual below 4"' }
+  if (v <= 5) return { color: 'var(--subtext)', text: '✓ Hold — residual 4–5"' }
+  if (v <= 7) return { color: 'var(--gold)',    text: '⬇ Remove one move — residual 6–7"' }
+  return            { color: 'var(--grass)',    text: '🌿 Topping target — residual 8–9"' }
+}
+
+function to24Input(fmt12Str) {
+  if (!fmt12Str) return '00:00'
+  const match = fmt12Str.match(/(\d+):(\d+)\s*(AM|PM)/i)
+  if (!match) return '00:00'
+  let h = parseInt(match[1])
+  const m = match[2], ampm = match[3].toUpperCase()
+  if (ampm === 'PM' && h !== 12) h += 12
+  if (ampm === 'AM' && h === 12) h = 0
+  return `${String(h).padStart(2,'0')}:${m}`
+}
+
+const emptyForm = {
+  date: new Date().toISOString().slice(0,10),
+  machine_id: '', herd_id: '', plan_id: '', pass_id: '',
+  spans_from: 1, spans_to: 1,
+  ipm: 20, moves_per_day: 6,
+  sunrise_time: '06:00', sunset_time: '20:30',
+  goal: 'production', post_graze_residual: '',
+  notes: '', observations: '',
 }
 
 export default function ScheduleTab() {
   const { data: machines } = useMachines()
   const { data: herds }    = useHerds()
+  const { data: plans }    = useGrazingPlans()
   const { data: schedules, insert, update, remove, loading } = useSchedules()
-  const [form, setForm] = useState({ ...empty })
-  const [editing, setEditing] = useState(null)
-  const [saving, setSaving] = useState(false)
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const [form, setForm]           = useState({ ...emptyForm })
+  const [editing, setEditing]     = useState(null)
+  const [saving, setSaving]       = useState(false)
+  const [manualSched, setManualSched] = useState(null)
 
-  // Auto-fetch sun times on date change
+  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setManualSched(null) }
+
+  // Auto-fetch sun times
   useEffect(() => {
     if (!form.date) return
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        pos => fetchSunTimes(form.date, pos.coords.latitude, pos.coords.longitude)
-          .then(({ sunrise, sunset }) => setForm(f => ({ ...f, sunrise_time: sunrise, sunset_time: sunset }))),
-        () => fetchSunTimes(form.date)
-          .then(({ sunrise, sunset }) => setForm(f => ({ ...f, sunrise_time: sunrise, sunset_time: sunset })))
-      )
-    } else {
-      fetchSunTimes(form.date)
-        .then(({ sunrise, sunset }) => setForm(f => ({ ...f, sunrise_time: sunrise, sunset_time: sunset })))
-    }
+    const fetch = (lat, lng) => fetchSunTimes(form.date, lat, lng)
+      .then(({ sunrise, sunset }) => setForm(f => ({ ...f, sunrise_time: sunrise, sunset_time: sunset })))
+    navigator.geolocation
+      ? navigator.geolocation.getCurrentPosition(p => fetch(p.coords.latitude, p.coords.longitude), () => fetch(41.5, -99.5))
+      : fetch(41.5, -99.5)
   }, [form.date])
 
   const selMachine = machines.find(m => m.id === form.machine_id)
   const selHerd    = herds.find(h => h.id === form.herd_id)
-  const calc       = selMachine && selHerd ? calcSchedule({
-    machine: selMachine, herd: selHerd,
-    spansGrazed: form.spans_grazed, ipm: form.ipm,
-    movesPerRotation: form.moves_per_rotation, moveDist: form.move_dist,
-    sunriseTime: form.sunrise_time, sunsetTime: form.sunset_time,
-  }) : null
+  const machineSpans = selMachine
+    ? (typeof selMachine.spans === 'string' ? JSON.parse(selMachine.spans) : selMachine.spans) || []
+    : []
+  const endTowerRadius = getEndTowerRadius(machineSpans)
+  const isPivot = selMachine?.type === 'pivot'
+
+  // Calculate pass
+  let passCalc = null
+  if (selMachine && selHerd) {
+    const targetAcresDay = form.target_acres_day || 4.0 // use plan target or default
+    if (isPivot) {
+      passCalc = calcPivotPass({
+        spans: machineSpans,
+        spanFrom: form.spans_from,
+        spanTo: form.spans_to,
+        desiredGrazingIpm: form.ipm,
+        herd: selHerd,
+        targetAcresPerDay: targetAcresDay,
+      })
+    } else {
+      passCalc = calcLinearPass({
+        spans: machineSpans,
+        spanFrom: form.spans_from,
+        spanTo: form.spans_to,
+        ipm: form.ipm,
+        herd: selHerd,
+        targetAcresPerDay: targetAcresDay,
+        runLengthFt: selMachine.run_length_ft,
+      })
+    }
+    // Override moves_per_day with user input
+    if (passCalc) {
+      passCalc = { ...passCalc, movesPerDay: form.moves_per_day }
+      passCalc.actualAcresPerDay = +(passCalc.acresPerMove * form.moves_per_day).toFixed(3)
+    }
+  }
+
+  const runtime = passCalc?.runtimeMinutes || 30
+  const schedule = passCalc
+    ? generateMoveSchedule(form.sunrise_time, form.sunset_time, form.moves_per_day, runtime)
+    : []
+  const activeSchedule = manualSched || schedule
+
+  function handleTimeEdit(idx, newTime24) {
+    const base = manualSched || schedule
+    const updated = applyManualOverride(base, idx, newTime24, runtime)
+    setManualSched(updated)
+  }
 
   const hint = residualHint(form.post_graze_residual)
 
@@ -76,34 +124,44 @@ export default function ScheduleTab() {
     if (!form.machine_id || !form.herd_id) return
     setSaving(true)
     try {
+      const schedToSave = manualSched || schedule
       const row = {
         ...form,
-        move_schedule:       calc?.moveSchedule ? JSON.stringify(calc.moveSchedule) : null,
-        acres_per_move:      calc?.acresPerMove,
-        acres_per_day:       calc?.acresPerDay,
-        alloc_stock_density: calc?.allocStockDensity,
-        mins_per_move:       calc?.minsPerMove,
-        hrs_per_rotation:    calc?.hrsPerRotation,
-        days_per_pass:       calc?.daysPerPass,
-        num_passes:          calc?.numPasses,
-        full_rotation_days:  calc?.fullRotationDays,
+        move_schedule:       schedToSave ? JSON.stringify(schedToSave) : null,
+        acres_per_move:      passCalc?.acresPerMove,
+        acres_per_day:       passCalc?.actualAcresPerDay,
+        alloc_stock_density: selHerd && passCalc ? Math.round(selHerd.total_lw / passCalc.acresPerMove) : null,
+        degrees_per_move:    passCalc?.degreesPerMove || null,
+        end_tower_travel_in: passCalc?.endTowerTravelIn || null,
+        tl_ipm_setting:      passCalc?.tlIpmSetting || form.ipm,
+        runtime_minutes:     passCalc?.runtimeMinutes,
+        ipm:                 form.ipm,
+        spans_grazed:        `${form.spans_from}-${form.spans_to}`,
       }
       if (editing) await update(editing, row)
       else await insert(row)
-      setForm({ ...empty })
-      setEditing(null)
+      setForm({ ...emptyForm }); setEditing(null); setManualSched(null)
     } catch (e) { alert('Error: ' + e.message) }
     setSaving(false)
   }
 
   function editRow(s) {
+    const spansStr = s.spans_grazed || '1-1'
+    const parts    = spansStr.split('-').map(Number)
     setForm({
       date: s.date, machine_id: s.machine_id, herd_id: s.herd_id,
-      spans_grazed: s.spans_grazed, ipm: s.ipm, moves_per_rotation: s.moves_per_rotation,
-      move_dist: s.move_dist, sunrise_time: s.sunrise_time, sunset_time: s.sunset_time,
+      spans_from: parts[0] || 1, spans_to: parts[1] || parts[0] || 1,
+      ipm: s.ipm, moves_per_day: s.moves_per_day,
+      sunrise_time: s.sunrise_time, sunset_time: s.sunset_time,
       goal: s.goal, post_graze_residual: s.post_graze_residual || '',
       notes: s.notes || '', observations: s.observations || '',
     })
+    if (s.move_schedule) {
+      try {
+        const parsed = typeof s.move_schedule === 'string' ? JSON.parse(s.move_schedule) : s.move_schedule
+        if (parsed?.some(m => m.manual)) setManualSched(parsed)
+      } catch {}
+    }
     setEditing(s.id)
   }
 
@@ -111,8 +169,8 @@ export default function ScheduleTab() {
 
   return (
     <div>
-      <div className="section-heading">Daily Grazing Schedule</div>
-      <div className="section-desc">Build behavior-driven move schedules anchored to sunrise and sunset.</div>
+      <div className="section-heading">Daily Schedule</div>
+      <div className="section-desc">Generate behavior-driven move schedules. Runtime calculated from ipm and machine type.</div>
 
       <div className="card">
         <div className="card-title mb-2">{editing ? 'Edit Schedule' : 'New Schedule'}</div>
@@ -126,12 +184,12 @@ export default function ScheduleTab() {
           <div className="field">
             <label className="label">Machine</label>
             <select className="select" value={form.machine_id} onChange={e => {
-              set('machine_id', e.target.value)
               const m = machines.find(x => x.id === e.target.value)
-              if (m) set('move_dist', m.move_dist)
+              set('machine_id', e.target.value)
+              if (m) set('ipm', m.ipm)
             }}>
               <option value="">Select machine…</option>
-              {machines.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+              {machines.map(m => <option key={m.id} value={m.id}>{m.name} ({m.type})</option>)}
             </select>
           </div>
           <div className="field">
@@ -143,39 +201,61 @@ export default function ScheduleTab() {
           </div>
         </div>
 
+        {/* Span selection */}
+        {selMachine && machineSpans.length > 0 && (
+          <div style={{ marginBottom: '0.75rem' }}>
+            <div className="label" style={{ marginBottom: '0.4rem' }}>Active Spans (contiguous)</div>
+            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+              {machineSpans.map(s => {
+                const active = s.number >= form.spans_from && s.number <= form.spans_to
+                return (
+                  <button key={s.number} onClick={() => {
+                    if (s.number < form.spans_from) set('spans_from', s.number)
+                    else if (s.number > form.spans_to) set('spans_to', s.number)
+                    else if (s.number === form.spans_from && form.spans_from < form.spans_to) set('spans_from', s.number + 1)
+                    else if (s.number === form.spans_to && form.spans_from < form.spans_to) set('spans_to', s.number - 1)
+                  }} style={{
+                    background: active ? 'var(--moss)' : 'var(--bark2)',
+                    border: `1px solid ${active ? 'var(--grass)' : '#3a5520'}`,
+                    borderRadius: 6, padding: '5px 9px', cursor: 'pointer',
+                    color: active ? 'var(--white)' : 'var(--subtext)',
+                    fontFamily: 'DM Mono, monospace', fontSize: '0.7rem',
+                    transition: 'all 0.15s',
+                  }}>
+                    S{s.number}<div style={{ fontSize: '0.55rem' }}>{s.length_ft}ft</div>
+                  </button>
+                )
+              })}
+            </div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--subtext)', fontFamily: 'DM Mono, monospace' }}>
+              Active: Spans {form.spans_from}–{form.spans_to}
+              {isPivot && ` | Outer radius: ${machineSpans.slice(0, form.spans_to).reduce((s,x) => s+x.length_ft,0)} ft`}
+              {!isPivot && ` | Width: ${machineSpans.slice(form.spans_from-1, form.spans_to).reduce((s,x) => s+x.length_ft,0)} ft`}
+            </div>
+          </div>
+        )}
+
         {/* Row 2 */}
         <div className="grid-4" style={{ marginBottom: '0.75rem' }}>
           <div className="field">
-            <label className="label">Spans Grazed</label>
-            <input className="input" type="number" min={1} max={selMachine?.spans || 20} value={form.spans_grazed} onChange={e => set('spans_grazed', +e.target.value)} />
-          </div>
-          <div className="field">
-            <label className="label">Inches / Min</label>
+            <label className="label">Desired Grazing IPM</label>
             <input className="input" type="number" step="1" value={form.ipm} onChange={e => set('ipm', +e.target.value)} />
           </div>
           <div className="field">
-            <label className="label">Moves / Rotation</label>
-            <input className="input" type="number" min={1} value={form.moves_per_rotation} onChange={e => set('moves_per_rotation', +e.target.value)} />
+            <label className="label">Moves / Day</label>
+            <input className="input" type="number" min={1} value={form.moves_per_day} onChange={e => set('moves_per_day', +e.target.value)} />
           </div>
           <div className="field">
-            <label className="label">Move Dist (ft)</label>
-            <input className="input" type="number" value={form.move_dist} onChange={e => set('move_dist', +e.target.value)} />
-          </div>
-        </div>
-
-        {/* Row 3 — Sun times */}
-        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
-          <div className="field">
-            <label className="label">🌅 Sunrise (first move)</label>
+            <label className="label">🌅 Sunrise</label>
             <input className="input" type="time" value={form.sunrise_time} onChange={e => set('sunrise_time', e.target.value)} />
           </div>
           <div className="field">
-            <label className="label">🌇 Sunset (last move)</label>
+            <label className="label">🌇 Sunset</label>
             <input className="input" type="time" value={form.sunset_time} onChange={e => set('sunset_time', e.target.value)} />
           </div>
         </div>
 
-        {/* Row 4 — Goal + Residual */}
+        {/* Residual + goal */}
         <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
           <div className="field">
             <label className="label">Grazing Goal</label>
@@ -188,7 +268,8 @@ export default function ScheduleTab() {
           </div>
           <div className="field">
             <label className="label">Post-Graze Residual (in)</label>
-            <input className="input" type="number" step="0.5" placeholder="e.g. 4.5" value={form.post_graze_residual} onChange={e => set('post_graze_residual', e.target.value)} />
+            <input className="input" type="number" step="0.5" placeholder="e.g. 4.5"
+              value={form.post_graze_residual} onChange={e => set('post_graze_residual', e.target.value)} />
           </div>
         </div>
 
@@ -198,7 +279,18 @@ export default function ScheduleTab() {
           </div>
         )}
 
-        {/* Row 5 — Notes */}
+        {/* TL ipm callout for pivot inner spans */}
+        {isPivot && passCalc && passCalc.scaleFactor > 1.001 && (
+          <div style={{ background: 'rgba(240,192,64,0.12)', border: '1px solid rgba(240,192,64,0.4)', borderRadius: 8, padding: '0.75rem', marginBottom: '0.75rem', fontFamily: 'DM Mono, monospace', fontSize: '0.78rem', color: 'var(--gold)' }}>
+            ⚙ <strong>Set TL computer to: {passCalc.tlIpmSetting} ipm</strong><br />
+            <span style={{ color: 'var(--subtext)', fontSize: '0.7rem' }}>
+              End tower travels {passCalc.endTowerTravelIn} in ({(passCalc.endTowerTravelIn/12).toFixed(1)} ft) to give spans {form.spans_from}–{form.spans_to} a 50 ft move.
+              Scale factor: {passCalc.scaleFactor}×
+            </span>
+          </div>
+        )}
+
+        {/* Notes */}
         <div className="grid-2" style={{ marginBottom: '1rem' }}>
           <div className="field">
             <label className="label">Notes</label>
@@ -206,83 +298,103 @@ export default function ScheduleTab() {
           </div>
           <div className="field">
             <label className="label">Observations</label>
-            <textarea className="textarea" rows={2} value={form.observations} onChange={e => set('observations', e.target.value)} placeholder="Cattle behavior, grass quality…" />
+            <textarea className="textarea" rows={2} value={form.observations} onChange={e => set('observations', e.target.value)} placeholder="Cattle behavior…" />
           </div>
         </div>
 
-        {/* Live calc stats */}
-        {calc && (
+        {/* Calc stats */}
+        {passCalc && selHerd && (
           <>
             <hr className="divider" />
             <div className="card-sub mb-2">Calculated Summary</div>
             <div className="grid-4 mb-2">
-              {[
-                ['Acres / Move', calc.acresPerMove],
-                ['Acres / Day',  calc.acresPerDay],
-                ['Alloc lb/ac',  calc.allocStockDensity?.toLocaleString()],
-                ['Min / Move',   calc.minsPerMove],
-              ].map(([l, v]) => (
+              {(isPivot ? [
+                ['Ac/Move',        passCalc.acresPerMove],
+                ['Ac/Day',         passCalc.actualAcresPerDay],
+                ['Alloc lb/ac',    Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString()],
+                ['Runtime/Move',   passCalc.runtimeMinutes + ' min'],
+                ['TL IPM Set',     passCalc.tlIpmSetting],
+                ['End Tower',      passCalc.endTowerTravelIn + ' in'],
+                ['°/Move',         passCalc.degreesPerMove?.toFixed(3) + '°'],
+                ['Days/Rotation',  passCalc.daysPerRotation],
+              ] : [
+                ['Width',          passCalc.grazingWidth + ' ft'],
+                ['Ac/Move',        passCalc.acresPerMove],
+                ['Ac/Day',         passCalc.actualAcresPerDay],
+                ['Alloc lb/ac',    Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString()],
+                ['Runtime/Move',   passCalc.runtimeMinutes + ' min'],
+                ['Daily Travel',   passCalc.dailyTravelFt + ' ft'],
+                ['Days/Pass',      passCalc.daysPerPass],
+                ['IPM',            passCalc.tlIpmSetting],
+              ]).map(([l, v]) => (
                 <div key={l} className="stat-box">
-                  <div className="stat-val">{v}</div>
-                  <div className="stat-lbl">{l}</div>
-                </div>
-              ))}
-            </div>
-            <div className="grid-4 mb-2">
-              {[
-                ['Hrs / Rotation',   calc.hrsPerRotation],
-                ['Days / Pass',      calc.daysPerPass],
-                ['Passes',           calc.numPasses],
-                ['Full Rotation',    calc.fullRotationDays + 'd'],
-              ].map(([l, v]) => (
-                <div key={l} className="stat-box">
-                  <div className="stat-val">{v}</div>
-                  <div className="stat-lbl">{l}</div>
+                  <div className="stat-val" style={{ fontSize: '0.95rem' }}>{v}</div>
+                  <div className="stat-lbl" style={{ fontSize: '0.55rem' }}>{l}</div>
                 </div>
               ))}
             </div>
           </>
         )}
 
-        {/* Move schedule table */}
-        {calc?.moveSchedule?.length > 0 && (
+        {/* Move schedule */}
+        {activeSchedule.length > 0 && (
           <>
             <hr className="divider" />
-            <div className="card-sub mb-2">Move Schedule — Behavior-Driven Spacing</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+              <div className="card-sub">Move Schedule — Click start time to edit</div>
+              <div className="flex gap-1">
+                {manualSched && <span style={{ fontSize: '0.62rem', color: 'var(--gold)', fontFamily: 'DM Mono, monospace' }}>✎ Manual overrides</span>}
+                {manualSched && <button className="btn btn-secondary btn-sm" onClick={() => setManualSched(null)}>↺ Reset</button>}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.6rem' }}>
               {[
                 { label: 'Morning graze',  color: 'var(--sky)',    bg: '#0a1a2a' },
-                { label: 'Midday loaf',    color: 'var(--amber)',  bg: '#2a1a00' },
-                { label: 'Transition',     color: 'var(--straw)',  bg: '#2a2010' },
-                { label: 'Evening intake', color: 'var(--meadow)', bg: '#0a2010' },
+                { label: 'Midday loaf',    color: 'var(--gold)',   bg: '#1a1800' },
+                { label: 'Transition',     color: 'var(--harvest)',bg: '#1a1500' },
+                { label: 'Evening intake', color: 'var(--grass)',  bg: '#0a1a08' },
               ].map(b => (
-                <span key={b.label} style={{ background: b.bg, color: b.color, padding: '3px 9px', borderRadius: 4, fontSize: '0.65rem', fontFamily: 'DM Mono, monospace', border: `1px solid ${b.color}44` }}>{b.label}</span>
+                <span key={b.label} style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 4, fontSize: '0.6rem', fontFamily: 'DM Mono, monospace', border: `1px solid ${b.color}44` }}>{b.label}</span>
               ))}
             </div>
+
             <div style={{ overflowX: 'auto' }}>
-              <table className="schedule-table">
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
                 <thead>
                   <tr>
-                    {['Move #', 'Start', 'Stop', 'Run', 'Rest', 'Cycle', 'Period'].map(h => (
-                      <th key={h}>{h}</th>
+                    {['Move', 'Start ✎', 'Stop', 'Run', 'Rest', 'Cycle', 'Period'].map(h => (
+                      <th key={h} style={{ background: 'var(--bark2)', color: 'var(--harvest)', padding: '7px 10px', textAlign: 'left', fontFamily: 'DM Mono, monospace', fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', borderBottom: '1px solid #3a5520' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {calc.moveSchedule.map(mv => (
-                    <tr key={mv.moveNum} style={{ background: BG_MAP[mv.period?.label] || 'transparent' }}>
-                      <td style={{ color: mv.period?.color, fontFamily: 'DM Mono, monospace', fontWeight: 600 }}>#{mv.moveNum}</td>
-                      <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--cream)' }}>{mv.startTime}</td>
-                      <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--cream)' }}>{mv.stopTime}</td>
-                      <td style={{ color: 'var(--straw)' }}>{mv.runTime} min</td>
-                      <td style={{ color: mv.restToNext > 90 ? 'var(--amber)' : 'var(--straw)', fontWeight: mv.restToNext > 90 ? 600 : 400 }}>
-                        {mv.restToNext != null ? `${mv.restToNext} min` : '—'}
-                        {mv.restToNext > 90 && <span style={{ marginLeft: 5, fontSize: '0.6rem', color: 'var(--amber)' }}>loaf</span>}
-                      </td>
-                      <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--sage)' }}>{mv.cycleTime} min</td>
-                      <td style={{ fontSize: '0.68rem', color: mv.period?.color }}>{mv.period?.label}</td>
-                    </tr>
-                  ))}
+                  {activeSchedule.map((mv, idx) => {
+                    const isManual = mv.manual === true
+                    const isLong   = mv.restToNext > 120
+                    const rowBg    = BG_MAP[mv.period?.label] || 'transparent'
+                    return (
+                      <tr key={mv.moveNum} style={{ background: rowBg }}>
+                        <td style={{ padding: '7px 10px', color: mv.period?.color, fontFamily: 'DM Mono, monospace', fontWeight: 600 }}>
+                          #{mv.moveNum}
+                          {isManual && <span style={{ marginLeft: 4, fontSize: '0.58rem', color: 'var(--gold)' }}>✎</span>}
+                        </td>
+                        <td>
+                          <input type="time" value={to24Input(mv.startTime)}
+                            onChange={e => handleTimeEdit(idx, e.target.value)}
+                            style={{ background: isManual ? '#2a1e00' : 'transparent', border: isManual ? '1px solid var(--gold)' : '1px solid transparent', borderRadius: 4, color: isManual ? 'var(--gold)' : 'var(--cream)', fontFamily: 'DM Mono, monospace', fontSize: '0.78rem', padding: '2px 5px', cursor: 'pointer', width: 100 }} />
+                        </td>
+                        <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--subtext)', padding: '7px 10px' }}>{mv.stopTime}</td>
+                        <td style={{ color: 'var(--subtext)', padding: '7px 10px' }}>{mv.runTime} min</td>
+                        <td style={{ color: isLong ? 'var(--gold)' : 'var(--subtext)', fontWeight: isLong ? 600 : 400, padding: '7px 10px' }}>
+                          {mv.restToNext != null ? `${mv.restToNext} min` : '—'}
+                          {isLong && <span style={{ marginLeft: 4, fontSize: '0.58rem', color: 'var(--gold)' }}>loaf</span>}
+                        </td>
+                        <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--grass)', padding: '7px 10px' }}>{mv.cycleTime} min</td>
+                        <td style={{ fontSize: '0.68rem', color: mv.period?.color, padding: '7px 10px' }}>{mv.period?.label}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -294,7 +406,7 @@ export default function ScheduleTab() {
           <button className="btn btn-primary" onClick={save} disabled={saving}>
             {saving ? <><span className="spinner" /> Saving…</> : editing ? '✓ Update' : '+ Save Schedule'}
           </button>
-          {editing && <button className="btn btn-secondary" onClick={() => { setForm({ ...empty }); setEditing(null) }}>Cancel</button>}
+          {editing && <button className="btn btn-secondary" onClick={() => { setForm({ ...emptyForm }); setEditing(null); setManualSched(null) }}>Cancel</button>}
         </div>
       </div>
 
@@ -312,9 +424,12 @@ export default function ScheduleTab() {
                     <span className="mono text-sm text-muted">{s.date}</span>
                     <span className="badge">{m?.name || '?'}</span>
                     <span className="badge badge-amber">{h?.name || '?'}</span>
+                    {s.tl_ipm_setting && s.tl_ipm_setting !== s.ipm && (
+                      <span className="badge" style={{ borderColor: 'var(--gold)', color: 'var(--gold)' }}>TL: {s.tl_ipm_setting} ipm</span>
+                    )}
                   </div>
                   <div className="text-sm text-muted mt-1">
-                    {s.acres_per_day} ac/day · {s.alloc_stock_density?.toLocaleString()} lb/ac · {s.moves_per_rotation} moves · {s.full_rotation_days}d rotation
+                    Spans {s.spans_grazed} · {s.acres_per_day} ac/day · {s.moves_per_day} moves · {s.runtime_minutes} min/move
                   </div>
                 </div>
                 <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); remove(s.id) }}>✕</button>
