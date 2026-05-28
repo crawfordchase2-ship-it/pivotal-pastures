@@ -197,8 +197,9 @@ export function useAppSettings() {
 
   useEffect(() => {
     if (!user) return
-    supabase.from('app_settings').select('*').eq('user_id', user.id).single()
-      .then(({ data }) => { setSettings(data); setLoading(false) })
+    supabase.from('app_settings').select('*').eq('user_id', user.id).maybeSingle()
+      .then(({ data }) => { setSettings(data || {}); setLoading(false) })
+      .catch(() => { setSettings({}); setLoading(false) })
   }, [user])
 
   const save = async (updates) => {
