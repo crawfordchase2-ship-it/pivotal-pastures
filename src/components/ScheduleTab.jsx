@@ -1,14 +1,14 @@
 import { useState, useEffect } from 'react'
-import { useMachines, useHerds, useSchedules, useGrazingPlans, usePasses } from '../hooks/useData'
+import { useMachines, useHerds, useSchedules, useGrazingPlans } from '../hooks/useData'
 import {
   calcPivotPass, calcLinearPass, calcTargetAcresPerDay,
   generateMoveSchedule, applyManualOverride,
-  fetchSunTimes, getEndTowerRadius, behaviorLabel,
-  toMins, minsToTime24, fmt12,
+  fetchSunTimes, getEndTowerRadius,
+  toMins, fmt12,
 } from '../lib/grazing'
 
 const BG_MAP = {
-  'Morning graze': '#0a1a2a',
+  'Morning graze': '#0a1a08',
   'Midday loaf':   '#1a1800',
   'Transition':    '#1a1500',
   'Evening intake':'#0a1a08',
@@ -23,20 +23,19 @@ function residualHint(r) {
   return            { color: 'var(--grass)',    text: '🌿 Topping target — residual 8–9"' }
 }
 
-function to24Input(fmt12Str) {
-  if (!fmt12Str) return '00:00'
-  const match = fmt12Str.match(/(\d+):(\d+)\s*(AM|PM)/i)
-  if (!match) return '00:00'
-  let h = parseInt(match[1])
-  const m = match[2], ampm = match[3].toUpperCase()
-  if (ampm === 'PM' && h !== 12) h += 12
-  if (ampm === 'AM' && h === 12) h = 0
-  return `${String(h).padStart(2,'0')}:${m}`
+function to24(str) {
+  if (!str) return '00:00'
+  const m = str.match(/(\d+):(\d+)\s*(AM|PM)/i)
+  if (!m) return str.slice(0,5) || '00:00'
+  let h = parseInt(m[1])
+  if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12
+  if (m[3].toUpperCase() === 'AM' && h === 12) h = 0
+  return `${String(h).padStart(2,'0')}:${m[2]}`
 }
 
 const emptyForm = {
   date: new Date().toISOString().slice(0,10),
-  machine_id: '', herd_id: '', plan_id: '', pass_id: '',
+  machine_id: '', herd_id: '', plan_id: '',
   spans_from: 1, spans_to: 1,
   ipm: 20, moves_per_day: 6,
   sunrise_time: '06:00', sunset_time: '20:30',
@@ -54,6 +53,7 @@ export default function ScheduleTab() {
   const [editing, setEditing]     = useState(null)
   const [saving, setSaving]       = useState(false)
   const [manualSched, setManualSched] = useState(null)
+  const [activePlanInfo, setActivePlanInfo] = useState(null)
 
   const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setManualSched(null) }
 
@@ -67,39 +67,56 @@ export default function ScheduleTab() {
       : fetch(41.5, -99.5)
   }, [form.date])
 
-  const selMachine = machines.find(m => m.id === form.machine_id)
-  const selHerd    = herds.find(h => h.id === form.herd_id)
+  // Auto-load from active plan when machine selected
+  useEffect(() => {
+    if (!form.machine_id) return
+    const activePlan = plans.find(p => p.machine_id === form.machine_id && p.status === 'active')
+    if (activePlan) {
+      setActivePlanInfo(activePlan)
+      set('plan_id', activePlan.id)
+      // Load herd from plan if not set
+      if (!form.herd_id) setForm(f => ({ ...f, herd_id: activePlan.herd_id }))
+      // Load first active pass info
+      if (activePlan.passes_json) {
+        try {
+          const passes = JSON.parse(activePlan.passes_json)
+          const firstPass = passes.find(p => p.status !== 'skipped')
+          if (firstPass) {
+            setForm(f => ({ ...f,
+              spans_from: firstPass.span_from,
+              spans_to: firstPass.span_to,
+            }))
+          }
+        } catch {}
+      }
+    } else {
+      setActivePlanInfo(null)
+    }
+  }, [form.machine_id, plans])
+
+  const selMachine   = machines.find(m => m.id === form.machine_id)
+  const selHerd      = herds.find(h => h.id === form.herd_id)
   const machineSpans = selMachine
     ? (typeof selMachine.spans === 'string' ? JSON.parse(selMachine.spans) : selMachine.spans) || []
     : []
-  const endTowerRadius = getEndTowerRadius(machineSpans)
   const isPivot = selMachine?.type === 'pivot'
 
   // Calculate pass
   let passCalc = null
   if (selMachine && selHerd) {
-    const targetAcresDay = form.target_acres_day || 4.0 // use plan target or default
+    const tgt = activePlanInfo?.target_acres_per_day || 4.0
     if (isPivot) {
       passCalc = calcPivotPass({
-        spans: machineSpans,
-        spanFrom: form.spans_from,
-        spanTo: form.spans_to,
-        desiredGrazingIpm: form.ipm,
-        herd: selHerd,
-        targetAcresPerDay: targetAcresDay,
+        spans: machineSpans, spanFrom: form.spans_from, spanTo: form.spans_to,
+        desiredGrazingIpm: form.ipm, herd: selHerd, targetAcresPerDay: tgt,
       })
     } else {
       passCalc = calcLinearPass({
-        spans: machineSpans,
-        spanFrom: form.spans_from,
-        spanTo: form.spans_to,
-        ipm: form.ipm,
-        herd: selHerd,
-        targetAcresPerDay: targetAcresDay,
+        spans: machineSpans, spanFrom: form.spans_from, spanTo: form.spans_to,
+        ipm: form.ipm, herd: selHerd, targetAcresPerDay: tgt,
         runLengthFt: selMachine.run_length_ft,
       })
     }
-    // Override moves_per_day with user input
     if (passCalc) {
       passCalc = { ...passCalc, movesPerDay: form.moves_per_day }
       passCalc.actualAcresPerDay = +(passCalc.acresPerMove * form.moves_per_day).toFixed(3)
@@ -112,10 +129,9 @@ export default function ScheduleTab() {
     : []
   const activeSchedule = manualSched || schedule
 
-  function handleTimeEdit(idx, newTime24) {
+  function handleTimeEdit(idx, t24) {
     const base = manualSched || schedule
-    const updated = applyManualOverride(base, idx, newTime24, runtime)
-    setManualSched(updated)
+    setManualSched(applyManualOverride(base, idx, t24, runtime))
   }
 
   const hint = residualHint(form.post_graze_residual)
@@ -130,12 +146,12 @@ export default function ScheduleTab() {
         move_schedule:       schedToSave ? JSON.stringify(schedToSave) : null,
         acres_per_move:      passCalc?.acresPerMove,
         acres_per_day:       passCalc?.actualAcresPerDay,
-        alloc_stock_density: selHerd && passCalc ? Math.round(selHerd.total_lw / passCalc.acresPerMove) : null,
+        alloc_stock_density: selHerd && passCalc ? Math.round((selHerd.total_lw || 0) / passCalc.acresPerMove) : null,
         degrees_per_move:    passCalc?.degreesPerMove || null,
         end_tower_travel_in: passCalc?.endTowerTravelIn || null,
         tl_ipm_setting:      passCalc?.tlIpmSetting || form.ipm,
         runtime_minutes:     passCalc?.runtimeMinutes,
-        ipm:                 form.ipm,
+        moves_per_day:       form.moves_per_day,
         spans_grazed:        `${form.spans_from}-${form.spans_to}`,
       }
       if (editing) await update(editing, row)
@@ -146,23 +162,24 @@ export default function ScheduleTab() {
   }
 
   function editRow(s) {
-    const spansStr = s.spans_grazed || '1-1'
-    const parts    = spansStr.split('-').map(Number)
+    const parts = (s.spans_grazed || '1-1').split('-').map(Number)
     setForm({
       date: s.date, machine_id: s.machine_id, herd_id: s.herd_id,
+      plan_id: s.plan_id || '',
       spans_from: parts[0] || 1, spans_to: parts[1] || parts[0] || 1,
-      ipm: s.ipm, moves_per_day: s.moves_per_day,
+      ipm: s.ipm, moves_per_day: s.moves_per_day || 6,
       sunrise_time: s.sunrise_time, sunset_time: s.sunset_time,
       goal: s.goal, post_graze_residual: s.post_graze_residual || '',
       notes: s.notes || '', observations: s.observations || '',
     })
     if (s.move_schedule) {
       try {
-        const parsed = typeof s.move_schedule === 'string' ? JSON.parse(s.move_schedule) : s.move_schedule
-        if (parsed?.some(m => m.manual)) setManualSched(parsed)
+        const p = typeof s.move_schedule === 'string' ? JSON.parse(s.move_schedule) : s.move_schedule
+        if (p?.some(m => m.manual)) setManualSched(p)
       } catch {}
     }
     setEditing(s.id)
+    window.scrollTo(0,0)
   }
 
   if (loading) return <div className="text-muted text-sm" style={{ padding: '2rem' }}>Loading…</div>
@@ -170,13 +187,24 @@ export default function ScheduleTab() {
   return (
     <div>
       <div className="section-heading">Daily Schedule</div>
-      <div className="section-desc">Generate behavior-driven move schedules. Runtime calculated from ipm and machine type.</div>
+      <div className="section-desc">Behavior-driven move schedules. Select a machine with an active plan to auto-fill settings.</div>
 
       <div className="card">
         <div className="card-title mb-2">{editing ? 'Edit Schedule' : 'New Schedule'}</div>
 
+        {/* Active plan banner */}
+        {activePlanInfo && (
+          <div style={{ background: 'rgba(58,122,40,0.15)', border: '1px solid var(--moss)', borderRadius: 8, padding: '0.6rem 0.9rem', marginBottom: '0.75rem', fontSize: '0.78rem' }}>
+            <span style={{ color: 'var(--grass)', fontFamily: 'DM Mono, monospace' }}>● Active Plan: </span>
+            <span style={{ color: 'var(--cream)' }}>{activePlanInfo.name || 'Unnamed Plan'}</span>
+            <span style={{ color: 'var(--subtext)', marginLeft: 8 }}>
+              {activePlanInfo.target_acres_per_day?.toFixed(2)} ac/day target · {activePlanInfo.total_cycle_days}d cycle
+            </span>
+          </div>
+        )}
+
         {/* Row 1 */}
-        <div className="grid-3" style={{ marginBottom: '0.75rem' }}>
+        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
           <div className="field">
             <label className="label">Date</label>
             <input className="input" type="date" value={form.date} onChange={e => set('date', e.target.value)} />
@@ -185,13 +213,19 @@ export default function ScheduleTab() {
             <label className="label">Machine</label>
             <select className="select" value={form.machine_id} onChange={e => {
               const m = machines.find(x => x.id === e.target.value)
-              set('machine_id', e.target.value)
-              if (m) set('ipm', m.ipm)
+              setForm(f => ({ ...f, machine_id: e.target.value, ipm: m?.ipm || f.ipm }))
+              setManualSched(null)
             }}>
               <option value="">Select machine…</option>
-              {machines.map(m => <option key={m.id} value={m.id}>{m.name} ({m.type})</option>)}
+              {machines.map(m => {
+                const hasActive = plans.some(p => p.machine_id === m.id && p.status === 'active')
+                return <option key={m.id} value={m.id}>{m.name} ({m.type}){hasActive ? ' ●' : ''}</option>
+              })}
             </select>
           </div>
+        </div>
+
+        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
           <div className="field">
             <label className="label">Herd</label>
             <select className="select" value={form.herd_id} onChange={e => set('herd_id', e.target.value)}>
@@ -199,38 +233,49 @@ export default function ScheduleTab() {
               {herds.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
             </select>
           </div>
+          <div className="field">
+            <label className="label">Grazing Goal</label>
+            <select className="select" value={form.goal} onChange={e => set('goal', e.target.value)}>
+              <option value="production">Production Grazing</option>
+              <option value="topping">Topping</option>
+              <option value="stockpile">Stockpile</option>
+              <option value="recovery">Recovery</option>
+            </select>
+          </div>
         </div>
 
-        {/* Span selection */}
+        {/* Span selector */}
         {selMachine && machineSpans.length > 0 && (
           <div style={{ marginBottom: '0.75rem' }}>
-            <div className="label" style={{ marginBottom: '0.4rem' }}>Active Spans (contiguous)</div>
-            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+            <div className="label" style={{ marginBottom: '0.4rem' }}>Active Spans</div>
+            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.4rem' }}>
               {machineSpans.map(s => {
                 const active = s.number >= form.spans_from && s.number <= form.spans_to
                 return (
                   <button key={s.number} onClick={() => {
-                    if (s.number < form.spans_from) set('spans_from', s.number)
-                    else if (s.number > form.spans_to) set('spans_to', s.number)
-                    else if (s.number === form.spans_from && form.spans_from < form.spans_to) set('spans_from', s.number + 1)
-                    else if (s.number === form.spans_to && form.spans_from < form.spans_to) set('spans_to', s.number - 1)
+                    let newFrom = form.spans_from, newTo = form.spans_to
+                    if (s.number < newFrom) newFrom = s.number
+                    else if (s.number > newTo) newTo = s.number
+                    else if (s.number === newFrom && newFrom < newTo) newFrom = s.number + 1
+                    else if (s.number === newTo && newFrom < newTo) newTo = s.number - 1
+                    setForm(f => ({ ...f, spans_from: newFrom, spans_to: newTo }))
+                    setManualSched(null)
                   }} style={{
                     background: active ? 'var(--moss)' : 'var(--bark2)',
                     border: `1px solid ${active ? 'var(--grass)' : '#3a5520'}`,
                     borderRadius: 6, padding: '5px 9px', cursor: 'pointer',
                     color: active ? 'var(--white)' : 'var(--subtext)',
-                    fontFamily: 'DM Mono, monospace', fontSize: '0.7rem',
-                    transition: 'all 0.15s',
+                    fontFamily: 'DM Mono, monospace', fontSize: '0.7rem', transition: 'all 0.12s',
                   }}>
-                    S{s.number}<div style={{ fontSize: '0.55rem' }}>{s.length_ft}ft</div>
+                    S{s.number}<div style={{ fontSize: '0.53rem' }}>{s.length_ft}ft</div>
                   </button>
                 )
               })}
             </div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--subtext)', fontFamily: 'DM Mono, monospace' }}>
+            <div style={{ fontSize: '0.68rem', color: 'var(--subtext)', fontFamily: 'DM Mono, monospace' }}>
               Active: Spans {form.spans_from}–{form.spans_to}
-              {isPivot && ` | Outer radius: ${machineSpans.slice(0, form.spans_to).reduce((s,x) => s+x.length_ft,0)} ft`}
-              {!isPivot && ` | Width: ${machineSpans.slice(form.spans_from-1, form.spans_to).reduce((s,x) => s+x.length_ft,0)} ft`}
+              {isPivot && ` | Outer radius: ${machineSpans.slice(0, form.spans_to).reduce((s,x) => s + x.length_ft, 0)} ft`}
+              {!isPivot && ` | Width: ${machineSpans.slice(form.spans_from-1, form.spans_to).reduce((s,x) => s + x.length_ft, 0)} ft`}
             </div>
           </div>
         )}
@@ -238,7 +283,7 @@ export default function ScheduleTab() {
         {/* Row 2 */}
         <div className="grid-4" style={{ marginBottom: '0.75rem' }}>
           <div className="field">
-            <label className="label">Desired Grazing IPM</label>
+            <label className="label">Grazing IPM</label>
             <input className="input" type="number" step="1" value={form.ipm} onChange={e => set('ipm', +e.target.value)} />
           </div>
           <div className="field">
@@ -255,38 +300,24 @@ export default function ScheduleTab() {
           </div>
         </div>
 
-        {/* Residual + goal */}
-        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
-          <div className="field">
-            <label className="label">Grazing Goal</label>
-            <select className="select" value={form.goal} onChange={e => set('goal', e.target.value)}>
-              <option value="production">Production Grazing</option>
-              <option value="topping">Topping</option>
-              <option value="stockpile">Stockpile</option>
-              <option value="recovery">Recovery</option>
-            </select>
-          </div>
-          <div className="field">
-            <label className="label">Post-Graze Residual (in)</label>
-            <input className="input" type="number" step="0.5" placeholder="e.g. 4.5"
-              value={form.post_graze_residual} onChange={e => set('post_graze_residual', e.target.value)} />
-          </div>
+        {/* Residual */}
+        <div className="field" style={{ marginBottom: '0.75rem', maxWidth: 200 }}>
+          <label className="label">Post-Graze Residual (in)</label>
+          <input className="input" type="number" step="0.5" placeholder="e.g. 4.5"
+            value={form.post_graze_residual} onChange={e => set('post_graze_residual', e.target.value)} />
         </div>
 
         {hint && (
-          <div style={{ padding: '9px 13px', borderRadius: 7, background: 'var(--bark)', border: `1px solid ${hint.color}`, color: hint.color, fontSize: '0.85rem', marginBottom: '0.75rem' }}>
+          <div style={{ padding: '8px 12px', borderRadius: 7, background: 'var(--bark)', border: `1px solid ${hint.color}`, color: hint.color, fontSize: '0.82rem', marginBottom: '0.75rem' }}>
             {hint.text}
           </div>
         )}
 
-        {/* TL ipm callout for pivot inner spans */}
+        {/* TL ipm callout */}
         {isPivot && passCalc && passCalc.scaleFactor > 1.001 && (
-          <div style={{ background: 'rgba(240,192,64,0.12)', border: '1px solid rgba(240,192,64,0.4)', borderRadius: 8, padding: '0.75rem', marginBottom: '0.75rem', fontFamily: 'DM Mono, monospace', fontSize: '0.78rem', color: 'var(--gold)' }}>
-            ⚙ <strong>Set TL computer to: {passCalc.tlIpmSetting} ipm</strong><br />
-            <span style={{ color: 'var(--subtext)', fontSize: '0.7rem' }}>
-              End tower travels {passCalc.endTowerTravelIn} in ({(passCalc.endTowerTravelIn/12).toFixed(1)} ft) to give spans {form.spans_from}–{form.spans_to} a 50 ft move.
-              Scale factor: {passCalc.scaleFactor}×
-            </span>
+          <div style={{ background: 'rgba(240,192,64,0.1)', border: '1px solid rgba(240,192,64,0.35)', borderRadius: 8, padding: '0.6rem 0.9rem', marginBottom: '0.75rem', fontFamily: 'DM Mono, monospace', fontSize: '0.75rem', color: 'var(--gold)' }}>
+            ⚙ Set TL computer to <strong>{passCalc.tlIpmSetting} ipm</strong> for spans {form.spans_from}–{form.spans_to}.
+            End tower travels {passCalc.endTowerTravelIn} in ({(passCalc.endTowerTravelIn/12).toFixed(1)} ft) per move.
           </div>
         )}
 
@@ -309,27 +340,27 @@ export default function ScheduleTab() {
             <div className="card-sub mb-2">Calculated Summary</div>
             <div className="grid-4 mb-2">
               {(isPivot ? [
-                ['Ac/Move',        passCalc.acresPerMove],
-                ['Ac/Day',         passCalc.actualAcresPerDay],
-                ['Alloc lb/ac',    Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString()],
-                ['Runtime/Move',   passCalc.runtimeMinutes + ' min'],
-                ['TL IPM Set',     passCalc.tlIpmSetting],
-                ['End Tower',      passCalc.endTowerTravelIn + ' in'],
-                ['°/Move',         passCalc.degreesPerMove?.toFixed(3) + '°'],
-                ['Days/Rotation',  passCalc.daysPerRotation],
+                ['Ac / Move',       passCalc.acresPerMove],
+                ['Ac / Day',        passCalc.actualAcresPerDay],
+                ['Alloc lb/ac',     selHerd.total_lw ? Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString() : '—'],
+                ['Runtime / Move',  passCalc.runtimeMinutes + ' min'],
+                ['TL IPM',          passCalc.tlIpmSetting + ' ipm'],
+                ['° / Move',        passCalc.degreesPerMove?.toFixed(3) + '°'],
+                ['End Tower',       passCalc.endTowerTravelIn + ' in'],
+                ['Days / Rotation', passCalc.daysPerRotation],
               ] : [
-                ['Width',          passCalc.grazingWidth + ' ft'],
-                ['Ac/Move',        passCalc.acresPerMove],
-                ['Ac/Day',         passCalc.actualAcresPerDay],
-                ['Alloc lb/ac',    Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString()],
-                ['Runtime/Move',   passCalc.runtimeMinutes + ' min'],
-                ['Daily Travel',   passCalc.dailyTravelFt + ' ft'],
-                ['Days/Pass',      passCalc.daysPerPass],
-                ['IPM',            passCalc.tlIpmSetting],
+                ['Width',           passCalc.grazingWidth + ' ft'],
+                ['Ac / Move',       passCalc.acresPerMove],
+                ['Ac / Day',        passCalc.actualAcresPerDay],
+                ['Alloc lb/ac',     selHerd.total_lw ? Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString() : '—'],
+                ['Runtime / Move',  passCalc.runtimeMinutes + ' min'],
+                ['Daily Travel',    passCalc.dailyTravelFt + ' ft'],
+                ['Days / Pass',     passCalc.daysPerPass],
+                ['IPM',             passCalc.tlIpmSetting],
               ]).map(([l, v]) => (
                 <div key={l} className="stat-box">
-                  <div className="stat-val" style={{ fontSize: '0.95rem' }}>{v}</div>
-                  <div className="stat-lbl" style={{ fontSize: '0.55rem' }}>{l}</div>
+                  <div className="stat-val" style={{ fontSize: '0.9rem' }}>{v}</div>
+                  <div className="stat-lbl" style={{ fontSize: '0.54rem' }}>{l}</div>
                 </div>
               ))}
             </div>
@@ -343,28 +374,28 @@ export default function ScheduleTab() {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
               <div className="card-sub">Move Schedule — Click start time to edit</div>
               <div className="flex gap-1">
-                {manualSched && <span style={{ fontSize: '0.62rem', color: 'var(--gold)', fontFamily: 'DM Mono, monospace' }}>✎ Manual overrides</span>}
+                {manualSched && <span style={{ fontSize: '0.6rem', color: 'var(--gold)', fontFamily: 'DM Mono, monospace' }}>✎ Manual overrides</span>}
                 {manualSched && <button className="btn btn-secondary btn-sm" onClick={() => setManualSched(null)}>↺ Reset</button>}
               </div>
             </div>
 
             <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.6rem' }}>
               {[
-                { label: 'Morning graze',  color: 'var(--sky)',    bg: '#0a1a2a' },
-                { label: 'Midday loaf',    color: 'var(--gold)',   bg: '#1a1800' },
-                { label: 'Transition',     color: 'var(--harvest)',bg: '#1a1500' },
-                { label: 'Evening intake', color: 'var(--grass)',  bg: '#0a1a08' },
+                { label: 'Morning graze',  color: 'var(--sky)',     bg: '#0a1a08' },
+                { label: 'Midday loaf',    color: 'var(--gold)',    bg: '#1a1800' },
+                { label: 'Transition',     color: 'var(--harvest)', bg: '#1a1500' },
+                { label: 'Evening intake', color: 'var(--grass)',   bg: '#0a1a08' },
               ].map(b => (
-                <span key={b.label} style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 4, fontSize: '0.6rem', fontFamily: 'DM Mono, monospace', border: `1px solid ${b.color}44` }}>{b.label}</span>
+                <span key={b.label} style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 4, fontSize: '0.6rem', fontFamily: 'DM Mono, monospace', border: `1px solid ${b.color}33` }}>{b.label}</span>
               ))}
             </div>
 
             <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
                 <thead>
                   <tr>
-                    {['Move', 'Start ✎', 'Stop', 'Run', 'Rest', 'Cycle', 'Period'].map(h => (
-                      <th key={h} style={{ background: 'var(--bark2)', color: 'var(--harvest)', padding: '7px 10px', textAlign: 'left', fontFamily: 'DM Mono, monospace', fontSize: '0.58rem', letterSpacing: '0.08em', textTransform: 'uppercase', borderBottom: '1px solid #3a5520' }}>{h}</th>
+                    {['Move','Start ✎','Stop','Run','Rest','Cycle','Period'].map(h => (
+                      <th key={h} style={{ background: 'var(--bark2)', color: 'var(--harvest)', padding: '6px 8px', textAlign: 'left', fontFamily: 'DM Mono, monospace', fontSize: '0.56rem', letterSpacing: '0.07em', textTransform: 'uppercase', borderBottom: '1px solid #3a5520' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -372,26 +403,25 @@ export default function ScheduleTab() {
                   {activeSchedule.map((mv, idx) => {
                     const isManual = mv.manual === true
                     const isLong   = mv.restToNext > 120
-                    const rowBg    = BG_MAP[mv.period?.label] || 'transparent'
+                    const bg       = BG_MAP[mv.period?.label] || 'transparent'
                     return (
-                      <tr key={mv.moveNum} style={{ background: rowBg }}>
-                        <td style={{ padding: '7px 10px', color: mv.period?.color, fontFamily: 'DM Mono, monospace', fontWeight: 600 }}>
-                          #{mv.moveNum}
-                          {isManual && <span style={{ marginLeft: 4, fontSize: '0.58rem', color: 'var(--gold)' }}>✎</span>}
+                      <tr key={mv.moveNum} style={{ background: bg }}>
+                        <td style={{ padding: '6px 8px', color: mv.period?.color, fontFamily: 'DM Mono, monospace', fontWeight: 600 }}>
+                          #{mv.moveNum}{isManual && <span style={{ marginLeft: 3, fontSize: '0.56rem', color: 'var(--gold)' }}>✎</span>}
                         </td>
                         <td>
-                          <input type="time" value={to24Input(mv.startTime)}
+                          <input type="time" value={to24(mv.startTime)}
                             onChange={e => handleTimeEdit(idx, e.target.value)}
-                            style={{ background: isManual ? '#2a1e00' : 'transparent', border: isManual ? '1px solid var(--gold)' : '1px solid transparent', borderRadius: 4, color: isManual ? 'var(--gold)' : 'var(--cream)', fontFamily: 'DM Mono, monospace', fontSize: '0.78rem', padding: '2px 5px', cursor: 'pointer', width: 100 }} />
+                            style={{ background: isManual ? '#2a1e00' : 'transparent', border: isManual ? '1px solid var(--gold)' : '1px solid transparent', borderRadius: 4, color: isManual ? 'var(--gold)' : 'var(--cream)', fontFamily: 'DM Mono, monospace', fontSize: '0.75rem', padding: '2px 4px', cursor: 'pointer', width: 95 }} />
                         </td>
-                        <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--subtext)', padding: '7px 10px' }}>{mv.stopTime}</td>
-                        <td style={{ color: 'var(--subtext)', padding: '7px 10px' }}>{mv.runTime} min</td>
-                        <td style={{ color: isLong ? 'var(--gold)' : 'var(--subtext)', fontWeight: isLong ? 600 : 400, padding: '7px 10px' }}>
-                          {mv.restToNext != null ? `${mv.restToNext} min` : '—'}
-                          {isLong && <span style={{ marginLeft: 4, fontSize: '0.58rem', color: 'var(--gold)' }}>loaf</span>}
+                        <td style={{ padding: '6px 8px', fontFamily: 'DM Mono, monospace', color: 'var(--subtext)' }}>{mv.stopTime}</td>
+                        <td style={{ padding: '6px 8px', color: 'var(--subtext)' }}>{mv.runTime}m</td>
+                        <td style={{ padding: '6px 8px', color: isLong ? 'var(--gold)' : 'var(--subtext)', fontWeight: isLong ? 600 : 400 }}>
+                          {mv.restToNext != null ? `${mv.restToNext}m` : '—'}
+                          {isLong && <span style={{ marginLeft: 3, fontSize: '0.55rem', color: 'var(--gold)' }}>loaf</span>}
                         </td>
-                        <td style={{ fontFamily: 'DM Mono, monospace', color: 'var(--grass)', padding: '7px 10px' }}>{mv.cycleTime} min</td>
-                        <td style={{ fontSize: '0.68rem', color: mv.period?.color, padding: '7px 10px' }}>{mv.period?.label}</td>
+                        <td style={{ padding: '6px 8px', fontFamily: 'DM Mono, monospace', color: 'var(--grass)' }}>{mv.cycleTime}m</td>
+                        <td style={{ padding: '6px 8px', fontSize: '0.66rem', color: mv.period?.color }}>{mv.period?.label}</td>
                       </tr>
                     )
                   })}
@@ -420,7 +450,7 @@ export default function ScheduleTab() {
             return (
               <div className="list-item" key={s.id} onClick={() => editRow(s)}>
                 <div>
-                  <div className="flex gap-1" style={{ alignItems: 'center' }}>
+                  <div className="flex gap-1" style={{ alignItems: 'center', marginBottom: '0.25rem' }}>
                     <span className="mono text-sm text-muted">{s.date}</span>
                     <span className="badge">{m?.name || '?'}</span>
                     <span className="badge badge-amber">{h?.name || '?'}</span>
@@ -428,7 +458,7 @@ export default function ScheduleTab() {
                       <span className="badge" style={{ borderColor: 'var(--gold)', color: 'var(--gold)' }}>TL: {s.tl_ipm_setting} ipm</span>
                     )}
                   </div>
-                  <div className="text-sm text-muted mt-1">
+                  <div className="text-sm text-muted">
                     Spans {s.spans_grazed} · {s.acres_per_day} ac/day · {s.moves_per_day} moves · {s.runtime_minutes} min/move
                   </div>
                 </div>
