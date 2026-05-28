@@ -66,6 +66,7 @@ export const useMachines      = () => useTable('machines',    'created_at', fals
 export const useHerds         = () => useTable('herds',       'created_at', false)
 export const useGrazingPlans  = () => useTable('grazing_plans','created_at', false)
 export const useSchedules     = () => useTable('schedules',   'date',       false)
+export const useRotations     = () => useTable('rotations',   'created_at', false)
 export const useDailyRecs     = () => useTable('daily_recommendations', 'date', false)
 export const useForageInventory = () => useTable('forage_inventory', 'created_at', false)
 export const useCameraConnections = () => useTable('camera_connections', 'created_at', false)
