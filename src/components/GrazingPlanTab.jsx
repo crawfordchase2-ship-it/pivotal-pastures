@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useMachines, useHerds, useGrazingPlans, usePasses } from '../hooks/useData'
 import {
   calcPivotPass, calcLinearPass, calcTargetAcresPerDay,
@@ -18,9 +18,27 @@ function SpanSelector({ spans, selectedFrom, selectedTo, onChange, label }) {
   const [from, setFrom] = useState(selectedFrom || 1)
   const [to, setTo]     = useState(selectedTo || 1)
 
-  function apply() {
-    if (from > to) return
-    onChange(from, to)
+  // Sync if parent changes
+  useEffect(() => { setFrom(selectedFrom || 1) }, [selectedFrom])
+  useEffect(() => { setTo(selectedTo || 1) }, [selectedTo])
+
+  function applySpans(newFrom, newTo) {
+    if (newFrom > newTo) return
+    setFrom(newFrom)
+    setTo(newTo)
+    onChange(newFrom, newTo)
+  }
+
+  function handleSpanClick(spanNumber) {
+    if (spanNumber < from) {
+      applySpans(spanNumber, to)
+    } else if (spanNumber > to) {
+      applySpans(from, spanNumber)
+    } else if (spanNumber === from && from < to) {
+      applySpans(spanNumber + 1, to)
+    } else if (spanNumber === to && from < to) {
+      applySpans(from, spanNumber - 1)
+    }
   }
 
   return (
@@ -30,13 +48,7 @@ function SpanSelector({ spans, selectedFrom, selectedTo, onChange, label }) {
         {spans.map((s, i) => {
           const inRange = s.number >= from && s.number <= to
           return (
-            <button key={i} onClick={() => {
-              if (from === to && to === s.number) return
-              if (s.number < from) setFrom(s.number)
-              else if (s.number > to) setTo(s.number)
-              else if (s.number === from && from < to) setFrom(s.number + 1)
-              else if (s.number === to && from < to) setTo(s.number - 1)
-            }} style={{
+            <button key={i} onClick={() => handleSpanClick(s.number)} style={{
               background: inRange ? 'var(--moss)' : 'var(--bark2)',
               border: `1px solid ${inRange ? 'var(--grass)' : '#3a5520'}`,
               borderRadius: 6, padding: '6px 10px', cursor: 'pointer',
@@ -55,21 +67,20 @@ function SpanSelector({ spans, selectedFrom, selectedTo, onChange, label }) {
       <div className="grid-2" style={{ marginBottom: '0.5rem' }}>
         <div className="field">
           <label className="label">From Span</label>
-          <select className="select" value={from} onChange={e => setFrom(+e.target.value)}>
+          <select className="select" value={from} onChange={e => applySpans(+e.target.value, to)}>
             {spans.map(s => <option key={s.number} value={s.number}>Span {s.number} ({s.length_ft} ft)</option>)}
           </select>
         </div>
         <div className="field">
           <label className="label">To Span</label>
-          <select className="select" value={to} onChange={e => setTo(+e.target.value)}>
+          <select className="select" value={to} onChange={e => applySpans(from, +e.target.value)}>
             {spans.map(s => <option key={s.number} value={s.number}>Span {s.number} ({s.length_ft} ft)</option>)}
           </select>
         </div>
       </div>
-      <button className="btn btn-primary btn-sm" onClick={apply} disabled={from > to}>
-        ✓ Set Spans {from}–{to}
-      </button>
-      {from > to && <div style={{ color: 'var(--alert)', fontSize: '0.72rem', marginTop: 4 }}>From span must be ≤ to span</div>}
+      <div style={{ fontSize: '0.7rem', color: 'var(--grass)', fontFamily: 'DM Mono, monospace' }}>
+        ✓ Active: Spans {from}–{to} ({to - from + 1} span{to - from !== 0 ? 's' : ''})
+      </div>
     </div>
   )
 }
@@ -506,25 +517,25 @@ Estimate dry matter: short dense grass ~1500 lb/ac, medium 8-10" ~2500 lb/ac, ta
 
                     {calc && (
                       <div className="grid-4 mt-2">
-                        {selMachine.type === 'pivot' ? [
-                          ['Ac/Move',       calc.acresPerMove],
-                          ['Moves/Day',     calc.movesPerDay],
-                          ['Ac/Day',        calc.actualAcresPerDay],
-                          ['Runtime',       calc.runtimeMinutes + ' min'],
-                          ['TL Set to',     calc.tlIpmSetting + ' ipm'],
-                          ['Scale Factor',  calc.scaleFactor + '×'],
-                          ['End Tower',     calc.endTowerTravelIn + ' in'],
-                          ['Days/Rotation', calc.daysPerRotation],
+                        {(selMachine.type === 'pivot' ? [
+                          ['Ac / Move',       calc.acresPerMove],
+                          ['Moves / Day',     calc.movesPerDay],
+                          ['Ac / Day',        calc.actualAcresPerDay],
+                          ['Runtime',         calc.runtimeMinutes + ' min'],
+                          ['TL Set to',       calc.tlIpmSetting + ' ipm'],
+                          ['Scale Factor',    calc.scaleFactor + '×'],
+                          ['End Tower',       calc.endTowerTravelIn + ' in'],
+                          ['Days / Rotation', calc.daysPerRotation],
                         ] : [
-                          ['Width',         calc.grazingWidth + ' ft'],
-                          ['Ac/Move',       calc.acresPerMove],
-                          ['Moves/Day',     calc.movesPerDay],
-                          ['Ac/Day',        calc.actualAcresPerDay],
-                          ['Runtime',       calc.runtimeMinutes + ' min'],
-                          ['Daily Travel',  calc.dailyTravelFt + ' ft'],
-                          ['Days/Pass',     calc.daysPerPass],
-                          ['IPM',           calc.tlIpmSetting],
-                        ].map(([l, v]) => (
+                          ['Width',           calc.grazingWidth + ' ft'],
+                          ['Ac / Move',       calc.acresPerMove],
+                          ['Moves / Day',     calc.movesPerDay],
+                          ['Ac / Day',        calc.actualAcresPerDay],
+                          ['Runtime',         calc.runtimeMinutes + ' min'],
+                          ['Daily Travel',    calc.dailyTravelFt + ' ft'],
+                          ['Days / Pass',     calc.daysPerPass],
+                          ['IPM',             calc.tlIpmSetting],
+                        ]).map(([l, v]) => (
                           <div key={l} className="stat-box" style={{ padding: '0.6rem' }}>
                             <div className="stat-val" style={{ fontSize: '0.9rem' }}>{v}</div>
                             <div className="stat-lbl" style={{ fontSize: '0.55rem' }}>{l}</div>
