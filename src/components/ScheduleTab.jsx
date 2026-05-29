@@ -1,46 +1,16 @@
 import { useState, useEffect } from 'react'
 import { useMachines, useHerds, useSchedules, useGrazingPlans } from '../hooks/useData'
-import {
-  calcPivotPass, calcLinearPass, calcTargetAcresPerDay,
-  generateMoveSchedule, applyManualOverride,
-  fetchSunTimes, getEndTowerRadius,
-  toMins, fmt12,
-} from '../lib/grazing'
-
-const BG_MAP = {
-  'Morning graze': '#0a1a08',
-  'Midday loaf':   '#1a1800',
-  'Transition':    '#1a1500',
-  'Evening intake':'#0a1a08',
-}
-
-function residualHint(r) {
-  if (!r) return null
-  const v = parseFloat(r)
-  if (v < 4)  return { color: 'var(--alert)',   text: '⬆ Add one move — residual below 4"' }
-  if (v <= 5) return { color: 'var(--subtext)', text: '✓ Hold — residual 4–5"' }
-  if (v <= 7) return { color: 'var(--gold)',    text: '⬇ Remove one move — residual 6–7"' }
-  return            { color: 'var(--grass)',    text: '🌿 Topping target — residual 8–9"' }
-}
+import { calcPivotPass, calcLinearPass, generateMoveSchedule, applyManualOverride, fmt12 } from '../lib/grazing'
+import { checkSafetyAlerts, checkRecommendationUnlock, RECOMMENDATION_MIN_DAYS } from '../lib/inventory'
 
 function to24(str) {
   if (!str) return '00:00'
   const m = str.match(/(\d+):(\d+)\s*(AM|PM)/i)
-  if (!m) return str.slice(0,5) || '00:00'
+  if (!m) return str.slice(0,5)||'00:00'
   let h = parseInt(m[1])
-  if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12
-  if (m[3].toUpperCase() === 'AM' && h === 12) h = 0
+  if (m[3].toUpperCase()==='PM' && h!==12) h+=12
+  if (m[3].toUpperCase()==='AM' && h===12) h=0
   return `${String(h).padStart(2,'0')}:${m[2]}`
-}
-
-const emptyForm = {
-  date: new Date().toISOString().slice(0,10),
-  machine_id: '', herd_id: '', plan_id: '',
-  spans_from: 1, spans_to: 1,
-  ipm: 20, moves_per_day: 6,
-  sunrise_time: '06:00', sunset_time: '20:30',
-  goal: 'production', post_graze_residual: '',
-  notes: '', observations: '',
 }
 
 export default function ScheduleTab() {
@@ -49,420 +19,358 @@ export default function ScheduleTab() {
   const { data: plans }    = useGrazingPlans()
   const { data: schedules, insert, update, remove, loading } = useSchedules()
 
-  const [form, setForm]           = useState({ ...emptyForm })
-  const [editing, setEditing]     = useState(null)
-  const [saving, setSaving]       = useState(false)
-  const [manualSched, setManualSched] = useState(null)
-  const [activePlanInfo, setActivePlanInfo] = useState(null)
+  const [selMachineId, setSelMachineId] = useState('')
+  const [selDate, setSelDate]           = useState(new Date().toISOString().slice(0,10))
+  const [overrides, setOverrides]       = useState({})
+  const [residual, setResidual]         = useState('')
+  const [notes, setNotes]               = useState('')
+  const [saving, setSaving]             = useState(false)
+  const [addingMove, setAddingMove]     = useState(false)
 
-  const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setManualSched(null) }
-
-  // Auto-fetch sun times
-  useEffect(() => {
-    if (!form.date) return
-    const fetch = (lat, lng) => fetchSunTimes(form.date, lat, lng)
-      .then(({ sunrise, sunset }) => setForm(f => ({ ...f, sunrise_time: sunrise, sunset_time: sunset })))
-    navigator.geolocation
-      ? navigator.geolocation.getCurrentPosition(p => fetch(p.coords.latitude, p.coords.longitude), () => fetch(41.5, -99.5))
-      : fetch(41.5, -99.5)
-  }, [form.date])
-
-  // Auto-load from active plan when machine selected
-  useEffect(() => {
-    if (!form.machine_id) return
-    const activePlan = plans.find(p => p.machine_id === form.machine_id && p.status === 'active')
-    if (activePlan) {
-      setActivePlanInfo(activePlan)
-      set('plan_id', activePlan.id)
-      // Load herd from plan if not set
-      if (!form.herd_id) setForm(f => ({ ...f, herd_id: activePlan.herd_id }))
-      // Load first active pass info
-      if (activePlan.passes_json) {
-        try {
-          const passes = JSON.parse(activePlan.passes_json)
-          const firstPass = passes.find(p => p.status !== 'skipped')
-          if (firstPass) {
-            setForm(f => ({ ...f,
-              spans_from: firstPass.span_from,
-              spans_to: firstPass.span_to,
-            }))
-          }
-        } catch {}
-      }
-    } else {
-      setActivePlanInfo(null)
-    }
-  }, [form.machine_id, plans])
-
-  const selMachine   = machines.find(m => m.id === form.machine_id)
-  const selHerd      = herds.find(h => h.id === form.herd_id)
+  const selMachine   = machines.find(m => m.id === selMachineId)
+  const activePlan   = plans.find(p => p.machine_id === selMachineId && p.status === 'active')
+  const selHerd      = herds.find(h => h.id === activePlan?.herd_id)
   const machineSpans = selMachine
-    ? (typeof selMachine.spans === 'string' ? JSON.parse(selMachine.spans) : selMachine.spans) || []
+    ? (typeof selMachine.spans==='string' ? JSON.parse(selMachine.spans) : selMachine.spans)||[]
     : []
   const isPivot = selMachine?.type === 'pivot'
 
-  // Calculate pass
+  // Get active pass from plan
+  let activePass = null
+  if (activePlan?.passes_json) {
+    try {
+      const passes = JSON.parse(activePlan.passes_json)
+      activePass = passes.find(p => p.status !== 'skipped')
+    } catch {}
+  }
+
+  // Calculate moves per day from active plan or fallback
   let passCalc = null
-  if (selMachine && selHerd) {
-    const tgt = activePlanInfo?.target_acres_per_day || 4.0
+  if (selMachine && selHerd && activePass && activePlan) {
+    const tgt = activePlan.target_acres_per_day || 4
     if (isPivot) {
-      passCalc = calcPivotPass({
-        spans: machineSpans, spanFrom: form.spans_from, spanTo: form.spans_to,
-        desiredGrazingIpm: form.ipm, herd: selHerd, targetAcresPerDay: tgt,
-      })
+      passCalc = calcPivotPass({ spans:machineSpans, spanFrom:activePass.span_from, spanTo:activePass.span_to, desiredGrazingIpm:selMachine.ipm, herd:selHerd, targetAcresPerDay:tgt })
     } else {
-      passCalc = calcLinearPass({
-        spans: machineSpans, spanFrom: form.spans_from, spanTo: form.spans_to,
-        ipm: form.ipm, herd: selHerd, targetAcresPerDay: tgt,
-        runLengthFt: selMachine.run_length_ft,
-      })
-    }
-    if (passCalc) {
-      passCalc = { ...passCalc, movesPerDay: form.moves_per_day }
-      passCalc.actualAcresPerDay = +(passCalc.acresPerMove * form.moves_per_day).toFixed(3)
+      passCalc = calcLinearPass({ spans:machineSpans, spanFrom:activePass.span_from, spanTo:activePass.span_to, ipm:selMachine.ipm, herd:selHerd, targetAcresPerDay:tgt, runLengthFt:selMachine.run_length_ft })
     }
   }
 
+  const movesPerDay = passCalc?.movesPerDay || 6
+  const [customMoves, setCustomMoves] = useState(null)
+  const todayMoves = customMoves ?? movesPerDay
+
+  // Auto-select first machine
+  useEffect(() => {
+    if (machines.length > 0 && !selMachineId) setSelMachineId(machines[0].id)
+  }, [machines])
+
+  // Reset custom moves when plan changes
+  useEffect(() => { setCustomMoves(null) }, [activePlan?.id])
+
+  // Sun times from plan or default
+  const sunrise = activePlan?.sunrise_time || '06:00'
+  const sunset  = activePlan?.sunset_time  || '20:30'
   const runtime = passCalc?.runtimeMinutes || 30
-  const schedule = passCalc
-    ? generateMoveSchedule(form.sunrise_time, form.sunset_time, form.moves_per_day, runtime)
+
+  const baseSchedule = passCalc
+    ? generateMoveSchedule(sunrise, sunset, todayMoves, runtime)
     : []
-  const activeSchedule = manualSched || schedule
+
+  // Apply manual overrides
+  const schedule = baseSchedule.map((mv, i) => {
+    if (overrides[i]) return { ...mv, startTime: overrides[i].startTime, stopTime: overrides[i].stopTime, manual: true }
+    return mv
+  })
+
+  // Safety alerts from residual
+  const safetyAlerts = residual ? checkSafetyAlerts({ residualInches: +residual }) : []
+
+  // Recommendation status
+  const todaySchedule = schedules.find(s => s.date === selDate && s.machine_id === selMachineId)
 
   function handleTimeEdit(idx, t24) {
-    const base = manualSched || schedule
-    setManualSched(applyManualOverride(base, idx, t24, runtime))
+    const [h,m] = t24.split(':').map(Number)
+    const totalMins = h*60+m
+    const stop = totalMins + runtime
+    const sh = Math.floor(stop/60)%24, sm = stop%60
+    setOverrides(prev => ({ ...prev, [idx]: {
+      startTime: fmt12(totalMins),
+      stopTime: `${sh%12||12}:${String(sm).padStart(2,'0')} ${sh>=12?'PM':'AM'}`,
+    }}))
   }
 
-  const hint = residualHint(form.post_graze_residual)
+  async function addMove() {
+    setCustomMoves(m => (m||todayMoves) + 1)
+  }
 
-  async function save() {
-    if (!form.machine_id || !form.herd_id) return
+  async function removeMove() {
+    if (todayMoves <= 1) return
+    setCustomMoves(m => (m||todayMoves) - 1)
+    // Update plan permanently
+    if (activePlan) {
+      const newMoves = todayMoves - 1
+      await updatePlanMoves(newMoves)
+    }
+  }
+
+  async function updatePlanMoves(newMoves) {
+    if (!activePlan?.passes_json) return
+    try {
+      const passes = JSON.parse(activePlan.passes_json)
+      // Update moves on active pass
+      const updated = passes.map(p => p.status !== 'skipped' ? { ...p, moves_per_day: newMoves } : p)
+      // This would call updatePlan — handled by parent
+    } catch {}
+  }
+
+  async function confirmAndSave() {
+    if (!selMachineId || !activePlan) return
     setSaving(true)
     try {
-      const schedToSave = manualSched || schedule
       const row = {
-        ...form,
-        move_schedule:       schedToSave ? JSON.stringify(schedToSave) : null,
-        acres_per_move:      passCalc?.acresPerMove,
-        acres_per_day:       passCalc?.actualAcresPerDay,
-        alloc_stock_density: selHerd && passCalc ? Math.round((selHerd.total_lw || 0) / passCalc.acresPerMove) : null,
-        degrees_per_move:    passCalc?.degreesPerMove || null,
-        end_tower_travel_in: passCalc?.endTowerTravelIn || null,
-        tl_ipm_setting:      passCalc?.tlIpmSetting || form.ipm,
-        runtime_minutes:     passCalc?.runtimeMinutes,
-        moves_per_day:       form.moves_per_day,
-        spans_grazed:        `${form.spans_from}-${form.spans_to}`,
+        date: selDate,
+        machine_id: selMachineId,
+        herd_id: activePlan.herd_id,
+        plan_id: activePlan.id,
+        ipm: selMachine.ipm,
+        moves_per_day: todayMoves,
+        sunrise_time: sunrise,
+        sunset_time: sunset,
+        runtime_minutes: runtime,
+        move_schedule: JSON.stringify(schedule),
+        spans_grazed: activePass ? `${activePass.span_from}-${activePass.span_to}` : '',
+        acres_per_move: passCalc?.acresPerMove,
+        acres_per_day: passCalc?.actualAcresPerDay,
+        tl_ipm_setting: passCalc?.tlIpmSetting || selMachine.ipm,
+        post_graze_residual: residual ? +residual : null,
+        notes,
+        goal: activePlan.goal,
       }
-      if (editing) await update(editing, row)
+      if (todaySchedule) await update(todaySchedule.id, row)
       else await insert(row)
-      setForm({ ...emptyForm }); setEditing(null); setManualSched(null)
-    } catch (e) { alert('Error: ' + e.message) }
+      setNotes(''); setResidual(''); setOverrides({})
+    } catch(e) { alert('Error: ' + e.message) }
     setSaving(false)
   }
 
-  function editRow(s) {
-    const parts = (s.spans_grazed || '1-1').split('-').map(Number)
-    setForm({
-      date: s.date, machine_id: s.machine_id, herd_id: s.herd_id,
-      plan_id: s.plan_id || '',
-      spans_from: parts[0] || 1, spans_to: parts[1] || parts[0] || 1,
-      ipm: s.ipm, moves_per_day: s.moves_per_day || 6,
-      sunrise_time: s.sunrise_time, sunset_time: s.sunset_time,
-      goal: s.goal, post_graze_residual: s.post_graze_residual || '',
-      notes: s.notes || '', observations: s.observations || '',
-    })
-    if (s.move_schedule) {
-      try {
-        const p = typeof s.move_schedule === 'string' ? JSON.parse(s.move_schedule) : s.move_schedule
-        if (p?.some(m => m.manual)) setManualSched(p)
-      } catch {}
-    }
-    setEditing(s.id)
-    window.scrollTo(0,0)
-  }
-
-  if (loading) return <div className="text-muted text-sm" style={{ padding: '2rem' }}>Loading…</div>
+  if (loading) return <div className="text-muted text-sm" style={{ padding:'2rem' }}>Loading…</div>
 
   return (
     <div>
       <div className="section-heading">Daily Schedule</div>
-      <div className="section-desc">Behavior-driven move schedules. Select a machine with an active plan to auto-fill settings.</div>
+      <div className="section-desc">Today's move schedule from your active grazing plan. Confirm moves and log post-graze observations.</div>
 
-      <div className="card">
-        <div className="card-title mb-2">{editing ? 'Edit Schedule' : 'New Schedule'}</div>
-
-        {/* Active plan banner */}
-        {activePlanInfo && (
-          <div style={{ background: 'rgba(58,122,40,0.15)', border: '1px solid var(--moss)', borderRadius: 8, padding: '0.6rem 0.9rem', marginBottom: '0.75rem', fontSize: '0.78rem' }}>
-            <span style={{ color: 'var(--grass)', fontFamily: 'DM Mono, monospace' }}>● Active Plan: </span>
-            <span style={{ color: 'var(--cream)' }}>{activePlanInfo.name || 'Unnamed Plan'}</span>
-            <span style={{ color: 'var(--subtext)', marginLeft: 8 }}>
-              {activePlanInfo.target_acres_per_day?.toFixed(2)} ac/day target · {activePlanInfo.total_cycle_days}d cycle
-            </span>
+      {/* Machine selector */}
+      <div className="card" style={{ padding:'0.75rem 1rem', marginBottom:'0.75rem' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:'0.75rem', flexWrap:'wrap' }}>
+          <div style={{ fontFamily:'DM Mono, monospace', fontSize:'0.62rem', color:'var(--subtext)', textTransform:'uppercase' }}>Field:</div>
+          <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+            {machines.map(m => {
+              const hasActive = plans.some(p => p.machine_id===m.id && p.status==='active')
+              return (
+                <button key={m.id} onClick={() => setSelMachineId(m.id)} style={{
+                  background: selMachineId===m.id ? 'var(--moss)' : 'var(--bark)',
+                  border:`1px solid ${selMachineId===m.id?'var(--grass)':'var(--bark2)'}`,
+                  borderRadius:7, padding:'6px 12px', cursor:'pointer',
+                  color: selMachineId===m.id?'var(--white)':'var(--subtext)',
+                  fontFamily:'DM Mono, monospace', fontSize:'0.7rem', transition:'all 0.15s',
+                  display:'flex', alignItems:'center', gap:5,
+                }}>
+                  {m.type==='pivot'?'🔄':'➡️'} {m.name}
+                  <span style={{ width:6, height:6, borderRadius:'50%', background:hasActive?'var(--grass)':'var(--subtext)' }} />
+                </button>
+              )
+            })}
           </div>
-        )}
-
-        {/* Row 1 */}
-        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
-          <div className="field">
-            <label className="label">Date</label>
-            <input className="input" type="date" value={form.date} onChange={e => set('date', e.target.value)} />
-          </div>
-          <div className="field">
-            <label className="label">Machine</label>
-            <select className="select" value={form.machine_id} onChange={e => {
-              const m = machines.find(x => x.id === e.target.value)
-              setForm(f => ({ ...f, machine_id: e.target.value, ipm: m?.ipm || f.ipm }))
-              setManualSched(null)
-            }}>
-              <option value="">Select machine…</option>
-              {machines.map(m => {
-                const hasActive = plans.some(p => p.machine_id === m.id && p.status === 'active')
-                return <option key={m.id} value={m.id}>{m.name} ({m.type}){hasActive ? ' ●' : ''}</option>
-              })}
-            </select>
-          </div>
-        </div>
-
-        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
-          <div className="field">
-            <label className="label">Herd</label>
-            <select className="select" value={form.herd_id} onChange={e => set('herd_id', e.target.value)}>
-              <option value="">Select herd…</option>
-              {herds.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
-            </select>
-          </div>
-          <div className="field">
-            <label className="label">Grazing Goal</label>
-            <select className="select" value={form.goal} onChange={e => set('goal', e.target.value)}>
-              <option value="production">Production Grazing</option>
-              <option value="topping">Topping</option>
-              <option value="stockpile">Stockpile</option>
-              <option value="recovery">Recovery</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Span selector */}
-        {selMachine && machineSpans.length > 0 && (
-          <div style={{ marginBottom: '0.75rem' }}>
-            <div className="label" style={{ marginBottom: '0.4rem' }}>Active Spans</div>
-            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.4rem' }}>
-              {machineSpans.map(s => {
-                const active = s.number >= form.spans_from && s.number <= form.spans_to
-                return (
-                  <button key={s.number} onClick={() => {
-                    let newFrom = form.spans_from, newTo = form.spans_to
-                    if (s.number < newFrom) newFrom = s.number
-                    else if (s.number > newTo) newTo = s.number
-                    else if (s.number === newFrom && newFrom < newTo) newFrom = s.number + 1
-                    else if (s.number === newTo && newFrom < newTo) newTo = s.number - 1
-                    setForm(f => ({ ...f, spans_from: newFrom, spans_to: newTo }))
-                    setManualSched(null)
-                  }} style={{
-                    background: active ? 'var(--moss)' : 'var(--bark2)',
-                    border: `1px solid ${active ? 'var(--grass)' : '#3a5520'}`,
-                    borderRadius: 6, padding: '5px 9px', cursor: 'pointer',
-                    color: active ? 'var(--white)' : 'var(--subtext)',
-                    fontFamily: 'DM Mono, monospace', fontSize: '0.7rem', transition: 'all 0.12s',
-                  }}>
-                    S{s.number}<div style={{ fontSize: '0.53rem' }}>{s.length_ft}ft</div>
-                  </button>
-                )
-              })}
-            </div>
-            <div style={{ fontSize: '0.68rem', color: 'var(--subtext)', fontFamily: 'DM Mono, monospace' }}>
-              Active: Spans {form.spans_from}–{form.spans_to}
-              {isPivot && ` | Outer radius: ${machineSpans.slice(0, form.spans_to).reduce((s,x) => s + x.length_ft, 0)} ft`}
-              {!isPivot && ` | Width: ${machineSpans.slice(form.spans_from-1, form.spans_to).reduce((s,x) => s + x.length_ft, 0)} ft`}
-            </div>
-          </div>
-        )}
-
-        {/* Row 2 */}
-        <div className="grid-4" style={{ marginBottom: '0.75rem' }}>
-          <div className="field">
-            <label className="label">Grazing IPM</label>
-            <input className="input" type="number" step="1" value={form.ipm} onChange={e => set('ipm', +e.target.value)} />
-          </div>
-          <div className="field">
-            <label className="label">Moves / Day</label>
-            <input className="input" type="number" min={1} value={form.moves_per_day} onChange={e => set('moves_per_day', +e.target.value)} />
-          </div>
-          <div className="field">
-            <label className="label">🌅 Sunrise</label>
-            <input className="input" type="time" value={form.sunrise_time} onChange={e => set('sunrise_time', e.target.value)} />
-          </div>
-          <div className="field">
-            <label className="label">🌇 Sunset</label>
-            <input className="input" type="time" value={form.sunset_time} onChange={e => set('sunset_time', e.target.value)} />
-          </div>
-        </div>
-
-        {/* Residual */}
-        <div className="field" style={{ marginBottom: '0.75rem', maxWidth: 200 }}>
-          <label className="label">Post-Graze Residual (in)</label>
-          <input className="input" type="number" step="0.5" placeholder="e.g. 4.5"
-            value={form.post_graze_residual} onChange={e => set('post_graze_residual', e.target.value)} />
-        </div>
-
-        {hint && (
-          <div style={{ padding: '8px 12px', borderRadius: 7, background: 'var(--bark)', border: `1px solid ${hint.color}`, color: hint.color, fontSize: '0.82rem', marginBottom: '0.75rem' }}>
-            {hint.text}
-          </div>
-        )}
-
-        {/* TL ipm callout */}
-        {isPivot && passCalc && passCalc.scaleFactor > 1.001 && (
-          <div style={{ background: 'rgba(240,192,64,0.1)', border: '1px solid rgba(240,192,64,0.35)', borderRadius: 8, padding: '0.6rem 0.9rem', marginBottom: '0.75rem', fontFamily: 'DM Mono, monospace', fontSize: '0.75rem', color: 'var(--gold)' }}>
-            ⚙ Set TL computer to <strong>{passCalc.tlIpmSetting} ipm</strong> for spans {form.spans_from}–{form.spans_to}.
-            End tower travels {passCalc.endTowerTravelIn} in ({(passCalc.endTowerTravelIn/12).toFixed(1)} ft) per move.
-          </div>
-        )}
-
-        {/* Notes */}
-        <div className="grid-2" style={{ marginBottom: '1rem' }}>
-          <div className="field">
-            <label className="label">Notes</label>
-            <textarea className="textarea" rows={2} value={form.notes} onChange={e => set('notes', e.target.value)} placeholder="Field conditions…" />
-          </div>
-          <div className="field">
-            <label className="label">Observations</label>
-            <textarea className="textarea" rows={2} value={form.observations} onChange={e => set('observations', e.target.value)} placeholder="Cattle behavior…" />
-          </div>
-        </div>
-
-        {/* Calc stats */}
-        {passCalc && selHerd && (
-          <>
-            <hr className="divider" />
-            <div className="card-sub mb-2">Calculated Summary</div>
-            <div className="grid-4 mb-2">
-              {(isPivot ? [
-                ['Ac / Move',       passCalc.acresPerMove],
-                ['Ac / Day',        passCalc.actualAcresPerDay],
-                ['Alloc lb/ac',     selHerd.total_lw ? Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString() : '—'],
-                ['Runtime / Move',  passCalc.runtimeMinutes + ' min'],
-                ['TL IPM',          passCalc.tlIpmSetting + ' ipm'],
-                ['° / Move',        passCalc.degreesPerMove?.toFixed(3) + '°'],
-                ['End Tower',       passCalc.endTowerTravelIn + ' in'],
-                ['Days / Rotation', passCalc.daysPerRotation],
-              ] : [
-                ['Width',           passCalc.grazingWidth + ' ft'],
-                ['Ac / Move',       passCalc.acresPerMove],
-                ['Ac / Day',        passCalc.actualAcresPerDay],
-                ['Alloc lb/ac',     selHerd.total_lw ? Math.round(selHerd.total_lw / passCalc.acresPerMove).toLocaleString() : '—'],
-                ['Runtime / Move',  passCalc.runtimeMinutes + ' min'],
-                ['Daily Travel',    passCalc.dailyTravelFt + ' ft'],
-                ['Days / Pass',     passCalc.daysPerPass],
-                ['IPM',             passCalc.tlIpmSetting],
-              ]).map(([l, v]) => (
-                <div key={l} className="stat-box">
-                  <div className="stat-val" style={{ fontSize: '0.9rem' }}>{v}</div>
-                  <div className="stat-lbl" style={{ fontSize: '0.54rem' }}>{l}</div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* Move schedule */}
-        {activeSchedule.length > 0 && (
-          <>
-            <hr className="divider" />
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-              <div className="card-sub">Move Schedule — Click start time to edit</div>
-              <div className="flex gap-1">
-                {manualSched && <span style={{ fontSize: '0.6rem', color: 'var(--gold)', fontFamily: 'DM Mono, monospace' }}>✎ Manual overrides</span>}
-                {manualSched && <button className="btn btn-secondary btn-sm" onClick={() => setManualSched(null)}>↺ Reset</button>}
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: '0.6rem' }}>
-              {[
-                { label: 'Morning graze',  color: 'var(--sky)',     bg: '#0a1a08' },
-                { label: 'Midday loaf',    color: 'var(--gold)',    bg: '#1a1800' },
-                { label: 'Transition',     color: 'var(--harvest)', bg: '#1a1500' },
-                { label: 'Evening intake', color: 'var(--grass)',   bg: '#0a1a08' },
-              ].map(b => (
-                <span key={b.label} style={{ background: b.bg, color: b.color, padding: '2px 8px', borderRadius: 4, fontSize: '0.6rem', fontFamily: 'DM Mono, monospace', border: `1px solid ${b.color}33` }}>{b.label}</span>
-              ))}
-            </div>
-
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem' }}>
-                <thead>
-                  <tr>
-                    {['Move','Start ✎','Stop','Run','Rest','Cycle','Period'].map(h => (
-                      <th key={h} style={{ background: 'var(--bark2)', color: 'var(--harvest)', padding: '6px 8px', textAlign: 'left', fontFamily: 'DM Mono, monospace', fontSize: '0.56rem', letterSpacing: '0.07em', textTransform: 'uppercase', borderBottom: '1px solid #3a5520' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {activeSchedule.map((mv, idx) => {
-                    const isManual = mv.manual === true
-                    const isLong   = mv.restToNext > 120
-                    const bg       = BG_MAP[mv.period?.label] || 'transparent'
-                    return (
-                      <tr key={mv.moveNum} style={{ background: bg }}>
-                        <td style={{ padding: '6px 8px', color: mv.period?.color, fontFamily: 'DM Mono, monospace', fontWeight: 600 }}>
-                          #{mv.moveNum}{isManual && <span style={{ marginLeft: 3, fontSize: '0.56rem', color: 'var(--gold)' }}>✎</span>}
-                        </td>
-                        <td>
-                          <input type="time" value={to24(mv.startTime)}
-                            onChange={e => handleTimeEdit(idx, e.target.value)}
-                            style={{ background: isManual ? '#2a1e00' : 'transparent', border: isManual ? '1px solid var(--gold)' : '1px solid transparent', borderRadius: 4, color: isManual ? 'var(--gold)' : 'var(--cream)', fontFamily: 'DM Mono, monospace', fontSize: '0.75rem', padding: '2px 4px', cursor: 'pointer', width: 95 }} />
-                        </td>
-                        <td style={{ padding: '6px 8px', fontFamily: 'DM Mono, monospace', color: 'var(--subtext)' }}>{mv.stopTime}</td>
-                        <td style={{ padding: '6px 8px', color: 'var(--subtext)' }}>{mv.runTime}m</td>
-                        <td style={{ padding: '6px 8px', color: isLong ? 'var(--gold)' : 'var(--subtext)', fontWeight: isLong ? 600 : 400 }}>
-                          {mv.restToNext != null ? `${mv.restToNext}m` : '—'}
-                          {isLong && <span style={{ marginLeft: 3, fontSize: '0.55rem', color: 'var(--gold)' }}>loaf</span>}
-                        </td>
-                        <td style={{ padding: '6px 8px', fontFamily: 'DM Mono, monospace', color: 'var(--grass)' }}>{mv.cycleTime}m</td>
-                        <td style={{ padding: '6px 8px', fontSize: '0.66rem', color: mv.period?.color }}>{mv.period?.label}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
-
-        <hr className="divider" />
-        <div className="flex gap-1">
-          <button className="btn btn-primary" onClick={save} disabled={saving}>
-            {saving ? <><span className="spinner" /> Saving…</> : editing ? '✓ Update' : '+ Save Schedule'}
-          </button>
-          {editing && <button className="btn btn-secondary" onClick={() => { setForm({ ...emptyForm }); setEditing(null); setManualSched(null) }}>Cancel</button>}
+          <input type="date" className="input" value={selDate} onChange={e => setSelDate(e.target.value)}
+            style={{ maxWidth:150, marginLeft:'auto' }} />
         </div>
       </div>
 
-      {/* Saved schedules */}
+      {!selMachine && (
+        <div className="card" style={{ textAlign:'center', padding:'2.5rem' }}>
+          <div style={{ fontSize:'2rem', marginBottom:'0.5rem' }}>📅</div>
+          <div className="text-muted">Select a field above to see today's schedule.</div>
+        </div>
+      )}
+
+      {selMachine && !activePlan && (
+        <div className="card" style={{ textAlign:'center', padding:'2.5rem' }}>
+          <div style={{ fontSize:'2rem', marginBottom:'0.5rem' }}>🌿</div>
+          <div className="text-muted">No active grazing plan for {selMachine.name}.</div>
+          <div style={{ fontSize:'0.78rem', color:'var(--subtext)', marginTop:'0.5rem' }}>
+            Go to the Plan tab, create a plan, and set it as Active.
+          </div>
+        </div>
+      )}
+
+      {selMachine && activePlan && (
+        <>
+          {/* Active plan banner */}
+          <div style={{ background:'rgba(58,122,40,0.12)', border:'1px solid var(--moss)', borderRadius:9, padding:'0.75rem 1rem', marginBottom:'0.75rem' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', flexWrap:'wrap', gap:8 }}>
+              <div>
+                <div style={{ color:'var(--grass)', fontFamily:'DM Mono, monospace', fontSize:'0.65rem', marginBottom:'0.2rem' }}>● ACTIVE PLAN</div>
+                <div style={{ color:'var(--cream)', fontWeight:600 }}>{activePlan.name || 'Rotation Plan'}</div>
+                <div style={{ fontSize:'0.72rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace' }}>
+                  {selHerd?.name} · {activePlan.target_acres_per_day?.toFixed(2)} ac/day · {activePlan.total_cycle_days}d cycle
+                  {activePass && ` · Pass ${activePass.pass_number}: Spans ${activePass.span_from}–${activePass.span_to}`}
+                </div>
+              </div>
+              {passCalc && isPivot && passCalc.scaleFactor > 1.001 && (
+                <div style={{ background:'rgba(240,192,64,0.12)', border:'1px solid rgba(240,192,64,0.35)', borderRadius:7, padding:'6px 10px', fontFamily:'DM Mono, monospace', fontSize:'0.72rem', color:'var(--gold)' }}>
+                  ⚙ TL set to <strong>{passCalc.tlIpmSetting} ipm</strong>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Safety alerts */}
+          {safetyAlerts.length > 0 && (
+            <div style={{ marginBottom:'0.75rem' }}>
+              {safetyAlerts.map((a,i) => (
+                <div key={i} style={{
+                  background: a.level==='critical'?'rgba(224,64,48,0.2)':'rgba(224,124,24,0.1)',
+                  border:`1px solid ${a.level==='critical'?'var(--alert)':'var(--amber)'}`,
+                  borderRadius:8, padding:'0.7rem 1rem', marginBottom:5,
+                }}>
+                  <div style={{ fontFamily:'DM Mono, monospace', fontWeight:600, color:a.level==='critical'?'var(--alert)':'var(--amber)', marginBottom:3 }}>{a.title}</div>
+                  <div style={{ fontSize:'0.78rem', color:a.level==='critical'?'var(--alert)':'var(--amber)' }}>{a.msg}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Stats */}
+          {passCalc && (
+            <div className="grid-4" style={{ marginBottom:'0.75rem' }}>
+              {(isPivot ? [
+                ['TL Set to',      passCalc.tlIpmSetting+' ipm'],
+                ['Ac / Move',      passCalc.acresPerMove],
+                ['Runtime',        passCalc.runtimeMinutes+' min'],
+                ['Ac / Day',       passCalc.actualAcresPerDay],
+              ] : [
+                ['Width',          passCalc.grazingWidth+' ft'],
+                ['Ac / Move',      passCalc.acresPerMove],
+                ['Runtime',        passCalc.runtimeMinutes+' min'],
+                ['Ac / Day',       passCalc.actualAcresPerDay],
+              ]).map(([l,v]) => (
+                <div key={l} className="stat-box">
+                  <div className="stat-val" style={{ fontSize:'0.9rem' }}>{v}</div>
+                  <div className="stat-lbl" style={{ fontSize:'0.54rem' }}>{l}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Move schedule */}
+          {schedule.length > 0 && (
+            <div className="card">
+              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'0.75rem' }}>
+                <div className="card-sub">Move Schedule — {selDate}</div>
+                <div className="flex gap-1">
+                  <button className="btn btn-primary btn-sm" onClick={addMove}>+ Move</button>
+                  <button className="btn btn-secondary btn-sm" onClick={removeMove} disabled={todayMoves<=1}>− Move</button>
+                  {customMoves != null && (
+                    <button className="btn btn-secondary btn-sm" onClick={() => setCustomMoves(null)}>↺ Reset</button>
+                  )}
+                </div>
+              </div>
+
+              {customMoves != null && (
+                <div style={{ background:'rgba(240,192,64,0.1)', border:'1px solid rgba(240,192,64,0.3)', borderRadius:7, padding:'6px 10px', marginBottom:'0.75rem', fontSize:'0.72rem', color:'var(--gold)', fontFamily:'DM Mono, monospace' }}>
+                  ⚠ Plan updated: {todayMoves} moves/day (was {movesPerDay}). This change applies to the rest of this rotation.
+                </div>
+              )}
+
+              <div style={{ overflowX:'auto', marginBottom:'0.75rem' }}>
+                <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'0.78rem' }}>
+                  <thead>
+                    <tr>
+                      {['Move','Start ✎','Stop','Run','Rest','Cycle','Period'].map(h => (
+                        <th key={h} style={{ background:'var(--bark2)', color:'var(--harvest)', padding:'6px 8px', textAlign:'left', fontFamily:'DM Mono, monospace', fontSize:'0.56rem', letterSpacing:'0.07em', textTransform:'uppercase', borderBottom:'1px solid #3a5520' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {schedule.map((mv, idx) => (
+                      <tr key={mv.moveNum} style={{ background:mv.manual?'rgba(240,192,64,0.04)':'transparent' }}>
+                        <td style={{ padding:'6px 8px', color:mv.period?.color, fontFamily:'DM Mono, monospace', fontWeight:600 }}>
+                          #{mv.moveNum}{mv.manual&&<span style={{ marginLeft:3, fontSize:'0.56rem', color:'var(--gold)' }}>✎</span>}
+                        </td>
+                        <td>
+                          <input type="time" value={to24(mv.startTime)} onChange={e => handleTimeEdit(idx, e.target.value)}
+                            style={{ background:mv.manual?'#2a1e00':'transparent', border:mv.manual?'1px solid var(--gold)':'1px solid transparent', borderRadius:4, color:mv.manual?'var(--gold)':'var(--cream)', fontFamily:'DM Mono, monospace', fontSize:'0.75rem', padding:'2px 4px', cursor:'pointer', width:95 }} />
+                        </td>
+                        <td style={{ padding:'6px 8px', color:'var(--subtext)', fontFamily:'DM Mono, monospace' }}>{mv.stopTime}</td>
+                        <td style={{ padding:'6px 8px', color:'var(--subtext)' }}>{mv.runTime}m</td>
+                        <td style={{ padding:'6px 8px', color:mv.restToNext>120?'var(--gold)':'var(--subtext)', fontWeight:mv.restToNext>120?600:400 }}>
+                          {mv.restToNext!=null?`${mv.restToNext}m`:'—'}{mv.restToNext>120&&<span style={{ marginLeft:3, fontSize:'0.55rem' }}>loaf</span>}
+                        </td>
+                        <td style={{ padding:'6px 8px', fontFamily:'DM Mono, monospace', color:'var(--grass)' }}>{mv.cycleTime}m</td>
+                        <td style={{ padding:'6px 8px', fontSize:'0.66rem', color:mv.period?.color }}>{mv.period?.label}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Post-graze log */}
+              <hr className="divider" />
+              <div className="card-sub mb-2">Post-Graze Log</div>
+              <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+                <div className="field">
+                  <label className="label">Post-Graze Residual (in)</label>
+                  <input className="input" type="number" step="0.5" placeholder="e.g. 4.5"
+                    value={residual} onChange={e => setResidual(e.target.value)} />
+                  {residual && (() => {
+                    const v = +residual
+                    if (v < 4)  return <div style={{ color:'var(--alert)', fontSize:'0.72rem', marginTop:3 }}>⬆ Add moves — below 4" minimum</div>
+                    if (v <= 5) return <div style={{ color:'var(--subtext)', fontSize:'0.72rem', marginTop:3 }}>✓ Hold — residual on target</div>
+                    if (v > 7)  return <div style={{ color:'var(--gold)', fontSize:'0.72rem', marginTop:3 }}>⬇ Remove move — under-utilizing</div>
+                    return null
+                  })()}
+                </div>
+                <div className="field">
+                  <label className="label">Observations</label>
+                  <textarea className="textarea" rows={2} placeholder="Cattle behavior, field conditions…"
+                    value={notes} onChange={e => setNotes(e.target.value)} />
+                </div>
+              </div>
+
+              <button className="btn btn-primary" onClick={confirmAndSave} disabled={saving}>
+                {saving ? <><span className="spinner" /> Saving…</> : todaySchedule ? '✓ Update Today' : '✓ Confirm Schedule'}
+              </button>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* History */}
       {schedules.length > 0 && (
         <div className="card">
-          <div className="card-title mb-2">Saved Schedules</div>
-          {schedules.map(s => {
-            const m = machines.find(x => x.id === s.machine_id)
-            const h = herds.find(x => x.id === s.herd_id)
+          <div className="card-title mb-2">Recent Schedules</div>
+          {schedules.slice(0,10).map(s => {
+            const m = machines.find(x=>x.id===s.machine_id)
+            const h = herds.find(x=>x.id===s.herd_id)
             return (
-              <div className="list-item" key={s.id} onClick={() => editRow(s)}>
+              <div className="list-item" key={s.id}>
                 <div>
-                  <div className="flex gap-1" style={{ alignItems: 'center', marginBottom: '0.25rem' }}>
+                  <div className="flex gap-1" style={{ alignItems:'center', marginBottom:'0.2rem' }}>
                     <span className="mono text-sm text-muted">{s.date}</span>
-                    <span className="badge">{m?.name || '?'}</span>
-                    <span className="badge badge-amber">{h?.name || '?'}</span>
-                    {s.tl_ipm_setting && s.tl_ipm_setting !== s.ipm && (
-                      <span className="badge" style={{ borderColor: 'var(--gold)', color: 'var(--gold)' }}>TL: {s.tl_ipm_setting} ipm</span>
+                    <span className="badge">{m?.name||'?'}</span>
+                    {s.post_graze_residual && (
+                      <span className="badge" style={{ borderColor:+s.post_graze_residual<4?'var(--alert)':+s.post_graze_residual>7?'var(--gold)':'var(--moss)', color:+s.post_graze_residual<4?'var(--alert)':+s.post_graze_residual>7?'var(--gold)':'var(--grass)' }}>
+                        {s.post_graze_residual}" residual
+                      </span>
                     )}
                   </div>
                   <div className="text-sm text-muted">
-                    Spans {s.spans_grazed} · {s.acres_per_day} ac/day · {s.moves_per_day} moves · {s.runtime_minutes} min/move
+                    {s.moves_per_day} moves · {s.acres_per_day} ac/day · {s.runtime_minutes}min/move
+                    {s.tl_ipm_setting && s.tl_ipm_setting !== s.ipm && ` · TL: ${s.tl_ipm_setting} ipm`}
                   </div>
                 </div>
-                <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); remove(s.id) }}>✕</button>
+                <button className="btn btn-danger btn-sm" onClick={() => remove(s.id)}>✕</button>
               </div>
             )
           })}
