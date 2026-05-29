@@ -13,7 +13,7 @@ import ReportsTab       from './components/ReportsTab'
 import SettingsTab      from './components/SettingsTab'
 
 // ── App version ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v1.0.3'
+const APP_VERSION = 'v1.0.4'
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
