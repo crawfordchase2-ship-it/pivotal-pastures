@@ -74,14 +74,19 @@ export default function FieldMapTab() {
       streetViewControl: false,
       fullscreenControl: true,
     })
+  }, [mapReady])
 
-    mapInstance.current.addListener('click', (e) => {
+  // Re-register click listener whenever pinMode changes so it always has latest value
+  useEffect(() => {
+    if (!mapInstance.current) return
+    const listener = mapInstance.current.addListener('click', (e) => {
       if (!pinModeRef.current) return
       const lat = e.latLng.lat()
       const lng = e.latLng.lng()
       handlePinDrop(lat, lng)
     })
-  }, [mapReady])
+    return () => window.google?.maps?.event?.removeListener(listener)
+  }, [mapReady, pinMode])
 
   // Draw machine on map when selection changes
   useEffect(() => {
@@ -252,7 +257,7 @@ export default function FieldMapTab() {
     return [points]
   }
 
-  async function handlePinDrop(lat, lng) {
+  const handlePinDrop = useCallback(async (lat, lng) => {
     if (!selMachine || !pinMode) return
     setSavingPin(true)
     try {
@@ -264,7 +269,7 @@ export default function FieldMapTab() {
       setPinMode(null)
     } catch (e) { alert('Error saving pin: ' + e.message) }
     setSavingPin(false)
-  }
+  }, [selMachine, pinMode, updateMachine])
 
   const hasPins = selMachine && (
     (selMachine.type === 'pivot' && selMachine.center_lat) ||
