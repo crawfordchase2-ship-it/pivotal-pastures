@@ -1,289 +1,356 @@
-import { useState, useRef } from 'react'
-import { useMachines, useGrazingPlans, usePasses, useForageInventory, useObservations, uploadPhoto } from '../hooks/useData'
-import { useAuth } from '../hooks/useAuth'
+// ─── Inventory & Growth Model ──────────────────────────────────────────────────
+// Conservative forage inventory with seasonal awareness
 
-const ZONES = [
-  { id: 'A', label: 'Zone A — Beginning', desc: 'First 1/3 of pass' },
-  { id: 'B', label: 'Zone B — Mid Field', desc: 'Middle 1/3 of pass' },
-  { id: 'C', label: 'Zone C — End',       desc: 'Final 1/3 of pass' },
-]
+// ── Grass types ───────────────────────────────────────────────────────────────
+export const GRASS_TYPES = {
+  cool_season: {
+    label: 'Cool Season (Fescue / Orchard / Brome / Bluegrass)',
+    peakMonths: [5, 6],       // May, June
+    fallFlushMonths: [9, 10], // Sep, Oct
+    dormantMonths: [1, 2, 12],
+    monthlyModifiers: {
+      1: 0.0, 2: 0.0, 3: 0.2, 4: 0.7,
+      5: 1.0, 6: 1.0, 7: 0.6, 8: 0.3,
+      9: 0.75, 10: 0.8, 11: 0.4, 12: 0.1,
+    },
+  },
+  warm_season: {
+    label: 'Warm Season (Bermuda / Native / Switchgrass)',
+    peakMonths: [7, 8],
+    fallFlushMonths: [],
+    dormantMonths: [1, 2, 3, 11, 12],
+    monthlyModifiers: {
+      1: 0.0, 2: 0.0, 3: 0.0, 4: 0.2,
+      5: 0.5, 6: 0.8, 7: 1.0, 8: 1.0,
+      9: 0.7, 10: 0.4, 11: 0.1, 12: 0.0,
+    },
+  },
+  mixed: {
+    label: 'Mixed Stand',
+    peakMonths: [5, 6, 7],
+    fallFlushMonths: [9],
+    dormantMonths: [1, 2, 12],
+    monthlyModifiers: {
+      1: 0.0, 2: 0.0, 3: 0.15, 4: 0.55,
+      5: 0.9, 6: 0.95, 7: 0.85, 8: 0.55,
+      9: 0.7, 10: 0.65, 11: 0.3, 12: 0.05,
+    },
+  },
+}
 
-const CHECKPOINT_TYPES = [
-  { id: 'entry', label: 'Rotation Entry', desc: 'Before cattle enter — sets DM baseline' },
-  { id: 'mid',   label: 'Mid Rotation',  desc: 'Halfway through — tracks consumption' },
-  { id: 'exit',  label: 'Rotation Exit', desc: 'After cattle leave — actual residual' },
-]
+// ── Growth stage detection ─────────────────────────────────────────────────────
+export const GROWTH_STAGES = {
+  vegetative:    { label: 'Vegetative',    color: 'var(--grass)',   icon: '🌱', urgency: 0 },
+  transition:    { label: 'Transition',    color: 'var(--gold)',    icon: '🌿', urgency: 1 },
+  reproductive:  { label: 'Reproductive', color: 'var(--alert)',   icon: '🌾', urgency: 2 },
+  dormant:       { label: 'Dormant',       color: 'var(--subtext)', icon: '🍂', urgency: 0 },
+}
 
-export default function InventoryTab() {
-  const { user }         = useAuth()
-  const { data: machines } = useMachines()
-  const { data: plans }    = useGrazingPlans()
-  const { data: inventory, insert: insertInv } = useForageInventory()
-  const { insert: insertObs } = useObservations({})
+export function detectGrowthStage(heightInches, month, grassType = 'cool_season') {
+  const modifier = GRASS_TYPES[grassType]?.monthlyModifiers[month] || 1.0
+  if (modifier < 0.1) return 'dormant'
+  if (heightInches < 6)  return 'vegetative'
+  if (heightInches < 10) return 'vegetative'
+  if (heightInches < 14) return 'transition'
+  return 'reproductive'
+}
 
-  const [selPlanId, setSelPlanId]   = useState('')
-  const [checkpoint, setCheckpoint] = useState('entry')
-  const [photos, setPhotos]         = useState({ A: [], B: [], C: [] })
-  const [aiResults, setAiResults]   = useState({ A: null, B: null, C: null })
-  const [aiLoading, setAiLoading]   = useState({ A: false, B: false, C: false })
-  const [saving, setSaving]         = useState(false)
+// ── Seasonal alerts ────────────────────────────────────────────────────────────
+export function getSeasonalAlerts(month, grassType, inventoryTrend) {
+  const alerts = []
+  const grass = GRASS_TYPES[grassType] || GRASS_TYPES.cool_season
 
-  const fileRefs = { A: useRef(), B: useRef(), C: useRef() }
+  if (grass.peakMonths.includes(month)) {
+    alerts.push({
+      type: 'growth',
+      level: 'info',
+      msg: 'Peak growth period — monitor for heading. Speed up rotation if grass getting ahead.',
+    })
+  }
+  if (month === 7 && grassType === 'cool_season') {
+    alerts.push({
+      type: 'slump',
+      level: 'warn',
+      msg: 'Summer slump approaching for cool season grass. Plan to extend rest periods 20-30% in August.',
+    })
+  }
+  if (month === 8 && grassType === 'cool_season') {
+    alerts.push({
+      type: 'slump',
+      level: 'warn',
+      msg: 'Summer slump — cool season grass near dormant. Extend rest periods. Watch cattle condition.',
+    })
+  }
+  if (grass.fallFlushMonths.includes(month)) {
+    alerts.push({
+      type: 'stockpile',
+      level: 'info',
+      msg: 'Fall flush starting — consider stockpiling acres for winter grazing. Defer now, graze when dormant.',
+    })
+  }
+  if (month === 11) {
+    alerts.push({
+      type: 'dormancy',
+      level: 'warn',
+      msg: 'Final rotation before dormancy — leave 4-6" residual for winter root protection.',
+    })
+  }
+  return alerts
+}
 
-  const selPlan = plans.find(p => p.id === selPlanId)
-  const selMachine = selPlan ? machines.find(m => m.id === selPlan.machine_id) : null
+// ── Strip inventory model ──────────────────────────────────────────────────────
+// The "circle" — every strip at a different stage of recovery
+export function buildStripInventory({
+  totalAcres,
+  acresPerDay,
+  rotationStartDate,
+  today,
+  residualsByDay,     // { dayNum: residualInches }
+  regrowthRatePerDay, // inches/day from recovery photos
+  entryDmPerAcre,
+  dmPerInch = 250,    // lb DM per inch per acre
+  grassType = 'cool_season',
+}) {
+  const todayDate  = new Date(today)
+  const startDate  = new Date(rotationStartDate)
+  const daysIn     = Math.floor((todayDate - startDate) / 86400000)
+  const strips     = []
+  const month      = todayDate.getMonth() + 1
+  const modifier   = GRASS_TYPES[grassType]?.monthlyModifiers[month] || 1.0
+  const adjRate    = regrowthRatePerDay * modifier
 
-  function addPhotos(zone, files) {
-    Array.from(files).forEach(f => {
-      const reader = new FileReader()
-      reader.onload = e => setPhotos(prev => ({
-        ...prev,
-        [zone]: [...prev[zone], {
-          id: Date.now() + Math.random(),
-          url: e.target.result,
-          base64: e.target.result.split(',')[1],
-          mimeType: f.type || 'image/jpeg',
-          file: f, name: f.name,
-        }]
-      }))
-      reader.readAsDataURL(f)
+  // Grazed strips — recovering
+  for (let day = 1; day <= daysIn; day++) {
+    const daysRecovering = daysIn - day
+    const residual = residualsByDay[day] || 4.5
+    const estHeight = residual + (daysRecovering * adjRate)
+    const estDm     = estHeight * dmPerInch
+    const stage     = detectGrowthStage(estHeight, month, grassType)
+    strips.push({
+      day, status: 'recovering', daysRecovering,
+      residualInches: residual,
+      estHeightInches: +estHeight.toFixed(1),
+      estDmPerAcre:    Math.round(estDm),
+      acres:           acresPerDay,
+      stage,
     })
   }
 
-  async function analyzeZone(zone) {
-    const zonePhotos = photos[zone]
-    if (zonePhotos.length === 0) return
-    setAiLoading(prev => ({ ...prev, [zone]: true }))
-    const photo = zonePhotos[zonePhotos.length - 1]
+  // Today's graze strip
+  strips.push({
+    day: daysIn + 1, status: 'grazing_today',
+    estHeightInches: 0, // from today's pre-graze photo
+    estDmPerAcre: entryDmPerAcre,
+    acres: acresPerDay, stage: 'vegetative',
+  })
 
-    try {
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 600,
-          system: `You are an expert grazing agronomist. Analyze this ${checkpoint} pasture photo and return ONLY valid JSON:
-{"height_inches":0,"dm_lbs_per_acre":0,"grass_density":0,"legume_pct":0,"stand_maturity":"vegetative","bloat_risk":"low","uniformity":0,"trampling":0,"bare_soil":"none","regrowth_rate_per_day":0,"confidence":"medium","notes":""}
-For entry photos: estimate height and DM available. For exit photos: estimate residual height, actual removal. regrowth_rate_per_day is inches/day if visible, else 0.`,
-          messages: [{ role: 'user', content: [
-            { type: 'image', source: { type: 'base64', media_type: photo.mimeType, data: photo.base64 } },
-            { type: 'text', text: `Zone ${zone} ${checkpoint} photo. Estimate forage inventory data.` }
-          ]}]
-        })
-      })
-      const data   = await resp.json()
-      const raw    = data.content?.find(c => c.type === 'text')?.text || '{}'
-      const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
-      setAiResults(prev => ({ ...prev, [zone]: parsed }))
-    } catch (e) {
-      setAiResults(prev => ({ ...prev, [zone]: { notes: 'Error: ' + e.message } }))
+  // Ungrazed strips ahead — still growing
+  const stripsAhead = Math.ceil((totalAcres - (daysIn + 1) * acresPerDay) / acresPerDay)
+  for (let i = 1; i <= stripsAhead; i++) {
+    const daysOfGrowth = daysIn + i
+    const estHeight = (entryDmPerAcre / dmPerInch) + (daysOfGrowth * adjRate * 0.3) // slower ungrazed growth
+    const estDm     = Math.min(entryDmPerAcre + (daysOfGrowth * adjRate * dmPerInch * 0.3), entryDmPerAcre * 1.8)
+    const stage     = detectGrowthStage(estHeight, month, grassType)
+    strips.push({
+      day: daysIn + 1 + i, status: 'ungrazed',
+      estHeightInches: +estHeight.toFixed(1),
+      estDmPerAcre:    Math.round(estDm),
+      acres:           acresPerDay, stage,
+    })
+  }
+
+  return strips
+}
+
+// ── Total inventory calculation ────────────────────────────────────────────────
+export function calcTotalInventory(strips, dailyIntakeLbs) {
+  const recovering = strips.filter(s => s.status === 'recovering')
+  const ungrazed   = strips.filter(s => s.status === 'ungrazed')
+  const all        = [...recovering, ...ungrazed]
+
+  const totalDm    = all.reduce((s, strip) => s + strip.estDmPerAcre * strip.acres, 0)
+  const conservDm  = totalDm * 0.90  // 90% conservative for inventory display only
+  const daysRemaining = conservDm / dailyIntakeLbs
+
+  const headingRisk = ungrazed.filter(s => s.stage === 'reproductive').length > 0
+
+  return {
+    totalDmEstimate:    Math.round(totalDm),
+    conservativeDm:     Math.round(conservDm),
+    daysRemaining:      +daysRemaining.toFixed(1),
+    recoveringAcres:    +(recovering.reduce((s,x) => s + x.acres, 0)).toFixed(1),
+    ungrazedAcres:      +(ungrazed.reduce((s,x) => s + x.acres, 0)).toFixed(1),
+    avgRecoveringDm:    recovering.length ? Math.round(recovering.reduce((s,x) => s + x.estDmPerAcre, 0) / recovering.length) : 0,
+    avgUngrazedDm:      ungrazed.length ? Math.round(ungrazed.reduce((s,x) => s + x.estDmPerAcre, 0) / ungrazed.length) : 0,
+    headingRisk,
+    stripsHeading:      ungrazed.filter(s => s.stage === 'reproductive').map(s => s.day),
+  }
+}
+
+// ── Recommendation engine ──────────────────────────────────────────────────────
+export const RECOMMENDATION_MIN_DAYS    = 7
+export const RECOVERY_PHOTO_INTERVAL    = 7  // days
+
+export function checkRecommendationUnlock({
+  daysOfPhotos,
+  hasRecoveryPhoto,
+  daysSinceLastRecoveryPhoto,
+}) {
+  if (daysOfPhotos < RECOMMENDATION_MIN_DAYS) {
+    return {
+      unlocked: false,
+      reason: 'baseline',
+      message: `Gathering baseline — Day ${daysOfPhotos} of ${RECOMMENDATION_MIN_DAYS}. Keep taking daily pre/post graze photos.`,
+      progress: daysOfPhotos / RECOMMENDATION_MIN_DAYS,
     }
-    setAiLoading(prev => ({ ...prev, [zone]: false }))
+  }
+  if (!hasRecoveryPhoto) {
+    return {
+      unlocked: false,
+      reason: 'recovery_needed',
+      message: 'Almost ready — take a recovery photo of the first grazed section to unlock recommendations.',
+      progress: 0.9,
+    }
+  }
+  const needsRecovery = daysSinceLastRecoveryPhoto >= RECOVERY_PHOTO_INTERVAL
+  return {
+    unlocked: true,
+    needsRecoveryPhoto: needsRecovery,
+    recoveryMessage: needsRecovery
+      ? `Recovery photo due — ${daysSinceLastRecoveryPhoto} days since last recovery check.`
+      : null,
+    confidence: daysOfPhotos >= 14 ? 'high' : daysOfPhotos >= 10 ? 'medium' : 'low',
+  }
+}
+
+// ── Safety alerts (fire day 1+, no waiting) ────────────────────────────────────
+export function checkSafetyAlerts({ residualInches, legumePct, trampling, seedHeads, soilWet, tempF }) {
+  const alerts = []
+
+  // CRITICAL — below 4"
+  if (residualInches != null && residualInches < 4) {
+    alerts.push({
+      type: 'residual_critical', level: 'critical',
+      title: 'RESIDUAL BELOW 4" — ADD MOVES',
+      msg: `Post-graze residual ${residualInches}" is below the 4" minimum. Cattle are grazing too hard. Add 1-2 moves immediately to open more acres per day and reduce pressure per strip.`,
+      action: 'add_moves', moveDelta: +2,
+    })
+  } else if (residualInches != null && residualInches < 4.5) {
+    alerts.push({
+      type: 'residual_warn', level: 'warn',
+      title: 'Residual approaching minimum',
+      msg: `Post-graze residual ${residualInches}" — approaching 4" minimum. Consider adding 1 move to reduce grazing pressure.`,
+      action: 'add_move', moveDelta: +1,
+    })
   }
 
-  // Calculate weighted average inventory
-  const zoneResults = ['A','B','C'].map(z => aiResults[z]).filter(Boolean)
-  const avgDm = zoneResults.length > 0
-    ? zoneResults.reduce((s, r) => s + (r.dm_lbs_per_acre || 0), 0) / zoneResults.length
-    : 0
-  const avgHeight = zoneResults.length > 0
-    ? zoneResults.reduce((s, r) => s + (r.height_inches || 0), 0) / zoneResults.length
-    : 0
-  const avgRegrowth = zoneResults.length > 0
-    ? zoneResults.reduce((s, r) => s + (r.regrowth_rate_per_day || 0), 0) / zoneResults.length
-    : 0
-
-  // Estimate total inventory
-  const acresPerDay   = selPlan?.target_acres_per_day || 0
-  const removePct     = selPlan?.removal_pct || 50
-  const usableDm      = avgDm * (removePct / 100)
-  const dailyIntake   = selPlan ? (selPlan.target_acres_per_day * avgDm * removePct / 100) : 0
-  const daysOfGrazing = usableDm > 0 && acresPerDay > 0 ? (acresPerDay * avgDm * removePct / 100) / (acresPerDay * avgDm * removePct / 100) : 0
-
-  async function saveCheckpoint() {
-    if (!selPlanId || zoneResults.length === 0) return
-    setSaving(true)
-    try {
-      await insertInv({
-        plan_id:           selPlanId,
-        machine_id:        selPlan.machine_id,
-        checkpoint_type:   checkpoint,
-        checkpoint_date:   new Date().toISOString().slice(0,10),
-        photos_taken:      Object.values(photos).flat().length,
-        zone_a_dm_per_acre: aiResults.A?.dm_lbs_per_acre || null,
-        zone_b_dm_per_acre: aiResults.B?.dm_lbs_per_acre || null,
-        zone_c_dm_per_acre: aiResults.C?.dm_lbs_per_acre || null,
-        avg_dm_per_acre:   +avgDm.toFixed(0),
-        avg_height_inches: +avgHeight.toFixed(1),
-        total_acres:       +(acresPerDay * (selPlan?.total_cycle_days || 0)).toFixed(1),
-        total_dm_available: +(avgDm * acresPerDay * (selPlan?.total_cycle_days || 0)).toFixed(0),
-        usable_dm:         +(usableDm * acresPerDay * (selPlan?.total_cycle_days || 0)).toFixed(0),
-        regrowth_rate_per_day: +avgRegrowth.toFixed(2),
-        confidence:        zoneResults[0]?.confidence || 'medium',
-      })
-      // Reset photos for next checkpoint
-      setPhotos({ A: [], B: [], C: [] })
-      setAiResults({ A: null, B: null, C: null })
-      alert('Checkpoint saved!')
-    } catch (e) { alert('Error: ' + e.message) }
-    setSaving(false)
+  // Residual too high
+  if (residualInches != null && residualInches > 7) {
+    alerts.push({
+      type: 'residual_high', level: 'info',
+      title: 'Residual above target',
+      msg: `Post-graze residual ${residualInches}" — cattle under-utilizing available grass. Consider removing 1 move to increase grazing pressure per strip.`,
+      action: 'remove_move', moveDelta: -1,
+    })
   }
 
-  // Get inventory history
-  const planInventory = inventory.filter(i => i.plan_id === selPlanId)
-    .sort((a,b) => new Date(b.checkpoint_date) - new Date(a.checkpoint_date))
+  // Bloat risk
+  if (legumePct != null && legumePct > 30 && soilWet) {
+    alerts.push({
+      type: 'bloat', level: 'alert',
+      title: 'Elevated bloat risk',
+      msg: `Legume content ${legumePct}% with wet conditions. Delay first move 2+ hours. Ensure hay access. Watch cattle closely after moves.`,
+      action: 'delay_first_move',
+    })
+  } else if (legumePct != null && legumePct > 40) {
+    alerts.push({
+      type: 'bloat', level: 'warn',
+      title: 'High legume content',
+      msg: `Legume content ${legumePct}% — monitor for bloat. Avoid moving hungry cattle onto lush legume.`,
+      action: 'monitor',
+    })
+  }
 
-  return (
-    <div>
-      <div className="section-heading">Forage Inventory</div>
-      <div className="section-desc">
-        Track forage dry matter through photo checkpoints at entry, mid-rotation, and exit.
-        6 photos across 3 zones builds a statistically valid inventory estimate.
-      </div>
+  // Trampling
+  if (trampling === 'heavy') {
+    alerts.push({
+      type: 'trampling', level: 'warn',
+      title: 'Heavy trampling detected',
+      msg: 'Significant soil disturbance visible. Add moves to reduce time on strip and protect soil structure.',
+      action: 'add_move', moveDelta: +1,
+    })
+  }
 
-      {/* Select plan */}
-      <div className="card">
-        <div className="grid-2" style={{ marginBottom: '0.75rem' }}>
-          <div className="field">
-            <label className="label">Active Grazing Plan</label>
-            <select className="select" value={selPlanId} onChange={e => setSelPlanId(e.target.value)}>
-              <option value="">Select plan…</option>
-              {plans.map(p => {
-                const m = machines.find(x => x.id === p.machine_id)
-                return <option key={p.id} value={p.id}>{m?.name} — {p.goal} ({p.status})</option>
-              })}
-            </select>
-          </div>
-          <div className="field">
-            <label className="label">Checkpoint Type</label>
-            <select className="select" value={checkpoint} onChange={e => setCheckpoint(e.target.value)}>
-              {CHECKPOINT_TYPES.map(c => <option key={c.id} value={c.id}>{c.label} — {c.desc}</option>)}
-            </select>
-          </div>
-        </div>
+  // Seed heads
+  if (seedHeads === true) {
+    alerts.push({
+      type: 'maturity', level: 'warn',
+      title: 'Seed heads visible — speed up rotation',
+      msg: 'Stand moving into reproductive stage. Quality declining. Speed up rotation to keep grass vegetative. Do not let it get away.',
+      action: 'speed_up',
+    })
+  }
 
-        {selPlan && (
-          <div style={{ background: 'rgba(15,26,10,0.6)', border: '1px solid var(--moss)', borderRadius: 8, padding: '0.75rem', fontSize: '0.8rem', color: 'var(--subtext)', marginBottom: '0.75rem' }}>
-            <strong style={{ color: 'var(--grass)' }}>{selMachine?.name}</strong> · {selPlan.target_acres_per_day?.toFixed(2)} ac/day · {selPlan.removal_pct}% removal target · {selPlan.total_cycle_days}d cycle
-          </div>
-        )}
-      </div>
+  return alerts
+}
 
-      {/* Photo zones */}
-      {selPlanId && (
-        <div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
-            {ZONES.map(zone => {
-              const zPhotos = photos[zone.id]
-              const result  = aiResults[zone.id]
-              const loading = aiLoading[zone.id]
-              return (
-                <div key={zone.id} className="card" style={{ padding: '1rem' }}>
-                  <div className="card-sub" style={{ marginBottom: '0.5rem' }}>{zone.label}</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--subtext)', marginBottom: '0.75rem' }}>{zone.desc}</div>
+// ── Optimization recommendations (day 7+ only) ────────────────────────────────
+export function buildOptimizationRec({
+  avgResidual,
+  avgRemovalPct,
+  currentMovesPerDay,
+  daysOfData,
+  regrowthRate,
+  daysRemaining,
+  rotationDays,
+  headingRisk,
+  inventoryTrend, // 'growing' | 'stable' | 'shrinking'
+}) {
+  const confidence = daysOfData >= 14 ? 'high' : daysOfData >= 10 ? 'medium' : 'low'
+  let action = 'hold', moveDelta = 0, summary = ''
 
-                  {/* Drop zone */}
-                  <div
-                    onClick={() => fileRefs[zone.id].current.click()}
-                    style={{ border: '2px dashed var(--bark2)', borderRadius: 8, padding: '1rem', textAlign: 'center', cursor: 'pointer', background: 'rgba(37,61,22,0.2)', marginBottom: '0.5rem' }}
-                  >
-                    <div style={{ fontSize: '1.5rem', marginBottom: '0.25rem' }}>📷</div>
-                    <div style={{ fontSize: '0.7rem', color: 'var(--subtext)' }}>
-                      {zPhotos.length === 0 ? 'Upload 2 photos' : `${zPhotos.length} photo${zPhotos.length !== 1 ? 's' : ''}`}
-                    </div>
-                  </div>
-                  <input ref={fileRefs[zone.id]} type="file" accept="image/*" multiple style={{ display: 'none' }}
-                    onChange={e => addPhotos(zone.id, e.target.files)} />
+  if (avgResidual < 4) {
+    action = 'add_moves'; moveDelta = 2
+    summary = `Residual averaging ${avgResidual}" — below minimum. Adding 2 moves to reduce grazing pressure.`
+  } else if (avgResidual < 5) {
+    action = 'add_move'; moveDelta = 1
+    summary = `Residual averaging ${avgResidual}" — approaching minimum. Adding 1 move as precaution.`
+  } else if (avgResidual > 7 && !headingRisk) {
+    action = 'remove_move'; moveDelta = -1
+    summary = `Residual averaging ${avgResidual}" — under-utilizing grass. Removing 1 move to increase utilization.`
+  } else if (headingRisk) {
+    action = 'speed_up'; moveDelta = 2
+    summary = `Seed heads detected in upcoming strips. Speeding up rotation to keep grass vegetative.`
+  } else {
+    action = 'hold'; moveDelta = 0
+    summary = `Residual ${avgResidual}" — grazing pressure on target. Hold at ${currentMovesPerDay} moves/day.`
+  }
 
-                  {/* Thumbnails */}
-                  {zPhotos.length > 0 && (
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: '0.5rem' }}>
-                      {zPhotos.map(p => (
-                        <img key={p.id} src={p.url} style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: 5, border: '1px solid var(--bark2)' }} />
-                      ))}
-                    </div>
-                  )}
+  const tomorrow = currentMovesPerDay + moveDelta
 
-                  {/* Analyze button */}
-                  {zPhotos.length > 0 && !result && (
-                    <button className="btn btn-primary btn-sm btn-full" onClick={() => analyzeZone(zone.id)} disabled={loading}>
-                      {loading ? <><span className="spinner" /> Analyzing…</> : '🤖 Analyze'}
-                    </button>
-                  )}
+  return {
+    action, moveDelta, tomorrow,
+    confidence, summary,
+    basedOnDays: daysOfData,
+    avgResidual, avgRemovalPct,
+  }
+}
 
-                  {/* AI result */}
-                  {result && (
-                    <div style={{ background: '#0f2208', border: '1px solid var(--moss)', borderRadius: 6, padding: '0.6rem', fontSize: '0.72rem' }}>
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 3 }}>
-                        <div><span style={{ color: 'var(--subtext)' }}>Height: </span><span style={{ color: 'var(--cream)', fontFamily: 'DM Mono, monospace' }}>{result.height_inches}"</span></div>
-                        <div><span style={{ color: 'var(--subtext)' }}>DM: </span><span style={{ color: 'var(--grass)', fontFamily: 'DM Mono, monospace' }}>{result.dm_lbs_per_acre?.toLocaleString()} lb</span></div>
-                        <div><span style={{ color: 'var(--subtext)' }}>Legume: </span><span style={{ color: 'var(--cream)', fontFamily: 'DM Mono, monospace' }}>{result.legume_pct}%</span></div>
-                        <div><span style={{ color: 'var(--subtext)' }}>Bloat: </span><span style={{ color: result.bloat_risk === 'high' ? 'var(--alert)' : 'var(--cream)', fontFamily: 'DM Mono, monospace' }}>{result.bloat_risk}</span></div>
-                        {result.regrowth_rate_per_day > 0 && (
-                          <div style={{ gridColumn: '1/-1' }}>
-                            <span style={{ color: 'var(--subtext)' }}>Regrowth: </span>
-                            <span style={{ color: 'var(--grass)', fontFamily: 'DM Mono, monospace' }}>{result.regrowth_rate_per_day}"/day</span>
-                          </div>
-                        )}
-                      </div>
-                      {result.notes && <div style={{ color: 'var(--subtext)', fontStyle: 'italic', marginTop: 4 }}>{result.notes}</div>}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+// ── AI calibration ─────────────────────────────────────────────────────────────
+export function calcAiCalibration(aiEstimate, backCalcActual) {
+  if (!aiEstimate || !backCalcActual) return null
+  const error = ((backCalcActual - aiEstimate) / aiEstimate) * 100
+  return {
+    aiEstimate, backCalcActual,
+    errorPct: +error.toFixed(1),
+    direction: error > 0 ? 'underestimate' : 'overestimate',
+    correctionFactor: +(backCalcActual / aiEstimate).toFixed(3),
+  }
+}
 
-          {/* Summary */}
-          {zoneResults.length > 0 && (
-            <div className="card" style={{ border: '1px solid var(--moss)' }}>
-              <div className="card-title mb-2">Inventory Summary</div>
-              <div className="grid-4 mb-2">
-                {[
-                  ['Avg Height',       avgHeight.toFixed(1) + '"'],
-                  ['Avg DM/Acre',      avgDm.toFixed(0) + ' lb'],
-                  ['Zones Assessed',   zoneResults.length + ' of 3'],
-                  ['Regrowth Rate',    avgRegrowth > 0 ? avgRegrowth.toFixed(2) + '"/day' : '—'],
-                ].map(([l, v]) => (
-                  <div key={l} className="stat-box">
-                    <div className="stat-val" style={{ fontSize: '1rem' }}>{v}</div>
-                    <div className="stat-lbl">{l}</div>
-                  </div>
-                ))}
-              </div>
-              <button className="btn btn-primary" onClick={saveCheckpoint} disabled={saving || zoneResults.length === 0}>
-                {saving ? <><span className="spinner" /> Saving…</> : `✓ Save ${CHECKPOINT_TYPES.find(c=>c.id===checkpoint)?.label} Checkpoint`}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Inventory history */}
-      {planInventory.length > 0 && (
-        <div className="card mt-2">
-          <div className="card-title mb-2">Inventory History</div>
-          {planInventory.map(inv => (
-            <div key={inv.id} className="list-item">
-              <div>
-                <div className="flex gap-1" style={{ alignItems: 'center', marginBottom: '0.3rem' }}>
-                  <span className="badge" style={{ borderColor: 'var(--grass)', color: 'var(--grass)' }}>{inv.checkpoint_type}</span>
-                  <span className="mono text-sm text-muted">{inv.checkpoint_date}</span>
-                  <span style={{ fontSize: '0.65rem', color: 'var(--subtext)' }}>{inv.photos_taken} photos · {inv.confidence} confidence</span>
-                </div>
-                <div style={{ fontSize: '0.72rem', color: 'var(--subtext)', fontFamily: 'DM Mono, monospace' }}>
-                  Avg: {inv.avg_height_inches}" · {inv.avg_dm_per_acre?.toLocaleString()} lb DM/ac
-                  {inv.regrowth_rate_per_day > 0 && ` · Regrowth ${inv.regrowth_rate_per_day}"/day`}
-                  {inv.zone_a_dm_per_acre && ` · A:${inv.zone_a_dm_per_acre}`}
-                  {inv.zone_b_dm_per_acre && ` B:${inv.zone_b_dm_per_acre}`}
-                  {inv.zone_c_dm_per_acre && ` C:${inv.zone_c_dm_per_acre}`}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
+// ── Cold weather intake adjustment ────────────────────────────────────────────
+export function coldWeatherIntakeAdj(tempF, baseIntakeLbs) {
+  if (tempF == null || tempF > 50) return baseIntakeLbs
+  if (tempF > 32) return Math.round(baseIntakeLbs * 1.1)  // 10% more 32-50°F
+  return Math.round(baseIntakeLbs * 1.15)                  // 15% more below freezing
 }
