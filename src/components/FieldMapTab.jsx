@@ -38,9 +38,13 @@ export default function FieldMapTab() {
   const [pinMode, setPinMode]           = useState(null) // 'center' | 'start' | 'end' | null
   const [savingPin, setSavingPin]       = useState(false)
 
+  // Keep ref in sync with state so map listener always has latest value
+  useEffect(() => { pinModeRef.current = pinMode }, [pinMode])
+
   const mapRef      = useRef(null)
   const mapInstance = useRef(null)
   const overlays    = useRef([]) // store drawn shapes for cleanup
+  const pinModeRef  = useRef(null) // always has latest pinMode for map listener
 
   const selMachine = machines.find(m => m.id === selMachineId)
   const machineSpans = selMachine
@@ -72,7 +76,7 @@ export default function FieldMapTab() {
     })
 
     mapInstance.current.addListener('click', (e) => {
-      if (!pinMode) return
+      if (!pinModeRef.current) return
       const lat = e.latLng.lat()
       const lng = e.latLng.lng()
       handlePinDrop(lat, lng)
