@@ -118,7 +118,6 @@ export default function HerdsTab() {
         // Legacy fields for compatibility
         pairs:         classes.find(c => c.classType === 'cow_calf_pair')?.count || 0,
         avg_weight:    classes[0]?.avgWeight || 0,
-        total_lw:      classes.length ? Math.round(totals.totalLW) : 0,
       }
       if (editing) await update(editing, row)
       else await insert(row)
