@@ -45,8 +45,9 @@ export default function ScheduleTab() {
   }
 
   // Calculate moves per day from active plan or fallback
+  // Note: herd not required — calc only needs targetAcresPerDay from the plan
   let passCalc = null
-  if (selMachine && selHerd && activePass && activePlan) {
+  if (selMachine && activePass && activePlan) {
     const tgt = activePlan.target_acres_per_day || 4
     if (isPivot) {
       passCalc = calcPivotPass({ spans:machineSpans, spanFrom:activePass.span_from, spanTo:activePass.span_to, desiredGrazingIpm:selMachine.ipm, herd:selHerd, targetAcresPerDay:tgt })
@@ -238,6 +239,14 @@ export default function ScheduleTab() {
                   <div style={{ fontSize:'0.78rem', color:a.level==='critical'?'var(--alert)':'var(--amber)' }}>{a.msg}</div>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Diagnostic when plan is active but schedule can't generate */}
+          {activePlan && !passCalc && (
+            <div style={{ background:'rgba(240,192,64,0.1)', border:'1px solid var(--gold)', borderRadius:8, padding:'0.75rem 1rem', marginBottom:'0.75rem', fontSize:'0.8rem', color:'var(--gold)' }}>
+              ⚠ This plan has no usable passes yet. {!activePass ? 'Open the plan in the Plan tab and add at least one pass (span range), then Save + Set Active again.' : 'Check that the machine has spans configured.'}
+              {!activePlan.target_acres_per_day && ' Target acres/day is also missing — rebuild the plan with a herd that has weight.'}
             </div>
           )}
 
