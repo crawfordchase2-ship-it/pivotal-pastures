@@ -38,7 +38,7 @@ export default function AnimalsTab() {
 
   const emptyAnimal = {
     tag: '', name: '', breed: 'Angus', sex: 'cow', color: '',
-    birth_date: '', birth_weight: '', sire_tag: '', dam_tag: '',
+    birth_date: '', birth_weight: '', current_weight: '', sire_tag: '', dam_tag: '',
     registration_number: '', status: 'active', lactating: false, notes: '', current_herd_id: '',
     breed_composition: [],
   }
@@ -113,8 +113,10 @@ export default function AnimalsTab() {
     if (!form.tag.trim()) { alert('Tag is required'); return }
     setSaving(true)
     try {
+      // current_weight is a form-only field (not an animals column) — pull it out
+      const { current_weight, ...animalForm } = form
       const row = {
-        ...form,
+        ...animalForm,
         birth_weight: form.birth_weight ? +form.birth_weight : null,
         birth_date: form.birth_date || null,
         current_herd_id: form.current_herd_id || null,
@@ -122,11 +124,19 @@ export default function AnimalsTab() {
       }
       if (selId && view === 'add') {
         await updateAnimal(selId, row)
+        // If a current weight was entered while editing, log it as today's weight
+        if (current_weight) {
+          await insertWeight({ animal_id: selId, date: today(), weight: +current_weight, event_type: 'routine' })
+        }
       } else {
         const created = await insertAnimal(row)
         // Auto-create birth weight record if provided
         if (form.birth_weight && form.birth_date) {
           await insertWeight({ animal_id: created.id, date: form.birth_date, weight: +form.birth_weight, event_type: 'birth' })
+        }
+        // Log current weight as a dated weight record (today)
+        if (current_weight) {
+          await insertWeight({ animal_id: created.id, date: today(), weight: +current_weight, event_type: 'routine' })
         }
       }
       setForm(emptyAnimal); setView('list'); setSelId(null)
@@ -137,7 +147,7 @@ export default function AnimalsTab() {
   function openEdit(a) {
     setForm({
       tag:a.tag, name:a.name||'', breed:a.breed||'Angus', sex:a.sex,
-      color:a.color||'', birth_date:a.birth_date||'', birth_weight:a.birth_weight||'',
+      color:a.color||'', birth_date:a.birth_date||'', birth_weight:a.birth_weight||'', current_weight:'',
       sire_tag:a.sire_tag||'', dam_tag:a.dam_tag||'', registration_number:a.registration_number||'',
       status:a.status, lactating:a.lactating||false, notes:a.notes||'', current_herd_id:a.current_herd_id||'',
       breed_composition: a.breed_composition ? (typeof a.breed_composition==='string'?JSON.parse(a.breed_composition):a.breed_composition) : [],
@@ -476,6 +486,15 @@ export default function AnimalsTab() {
               <label className="label">Birth Weight (lb)</label>
               <input className="input" type="number" value={form.birth_weight} onChange={e=>set('birth_weight',e.target.value)} placeholder="e.g. 82" />
             </div>
+          </div>
+
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Current Weight (lb){selId?' — adds today':''}</label>
+              <input className="input" type="number" value={form.current_weight} onChange={e=>set('current_weight',e.target.value)} placeholder="e.g. 1250" />
+              <div style={{ fontSize:'0.6rem', color:'var(--subtext)', marginTop:3 }}>Recorded as a weight entry dated today. Feeds herd weight.</div>
+            </div>
+            <div className="field"></div>
           </div>
 
           <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
