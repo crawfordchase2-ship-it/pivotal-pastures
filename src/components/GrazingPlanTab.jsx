@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
-import { useMachines, useHerds, useGrazingPlans, useRotations } from '../hooks/useData'
+import { useMachines, useHerds, useGrazingPlans, useRotations, useAnimals, useWeightRecords } from '../hooks/useData'
 import { calcPivotPass, calcLinearPass, calcTargetAcresPerDay, generateMoveSchedule, getEndTowerRadius, fmt12 } from '../lib/grazing'
+import { resolveHerdMetrics } from '../lib/animals.js'
 import { checkSafetyAlerts, checkRecommendationUnlock, GRASS_TYPES, detectGrowthStage } from '../lib/inventory'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
 
-const APP_VERSION = 'v1.0.4'
+const APP_VERSION = 'v3.23'
 
 // ── Span selector ─────────────────────────────────────────────────────────────
 function SpanSelector({ spans, from, to, onChange }) {
@@ -81,6 +82,8 @@ export default function GrazingPlanTab() {
   const { user } = useAuth()
   const { data: machines } = useMachines()
   const { data: herds }    = useHerds()
+  const { data: animals }  = useAnimals()
+  const { data: weightRecords } = useWeightRecords()
   const { data: plans, insert: insertPlan, update: updatePlan, remove: removePlan } = useGrazingPlans()
 
   const [view, setView]         = useState('list') // list | build
@@ -129,11 +132,27 @@ export default function GrazingPlanTab() {
       : go(41.5, -99.5)
   }, [form.start_date])
 
-  const targetCalc = selHerd ? calcTargetAcresPerDay({
-    totalLiveweight: selHerd.total_lw || (selHerd.pairs * (selHerd.avg_weight||1000) * 2),
-    forageDmPerAcre: form.forage_dm_per_acre,
-    removalPct: form.removal_pct,
-  }) : null
+  // Resolve herd weight: live from animal records if assigned, else stored estimate
+  const weightsByAnimal = {}
+  weightRecords.forEach(w => {
+    if (!weightsByAnimal[w.animal_id]) weightsByAnimal[w.animal_id] = []
+    weightsByAnimal[w.animal_id].push(w)
+  })
+  const herdMetrics = selHerd ? resolveHerdMetrics(selHerd, animals, weightsByAnimal) : null
+  const herdLiveweight = herdMetrics
+    ? (herdMetrics.totalLiveweight || selHerd.total_lw || (selHerd.pairs * (selHerd.avg_weight||1000) * 2))
+    : 0
+  // Prefer the herd's real per-class daily DM (lactating/calf-adjusted) when available
+  const herdDailyDm = herdMetrics && herdMetrics.dailyDmLbs ? herdMetrics.dailyDmLbs : (herdLiveweight * 0.025)
+
+  const targetCalc = selHerd ? (() => {
+    const usableDm = form.forage_dm_per_acre * (form.removal_pct / 100)
+    return {
+      dailyIntakeLbs: Math.round(herdDailyDm),
+      usableDmPerAcre: Math.round(usableDm),
+      targetAcresPerDay: usableDm > 0 ? +(herdDailyDm / usableDm).toFixed(3) : 0,
+    }
+  })() : null
 
   function calcPass(p) {
     if (!selMachine || !targetCalc || p.status === 'skipped') return null
