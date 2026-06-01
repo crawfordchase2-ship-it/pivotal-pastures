@@ -6,7 +6,7 @@ import { checkSafetyAlerts, checkRecommendationUnlock, GRASS_TYPES, detectGrowth
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
 
-const APP_VERSION = 'v3.23'
+const APP_VERSION = 'v3.24'
 
 // ── Span selector ─────────────────────────────────────────────────────────────
 function SpanSelector({ spans, from, to, onChange }) {
