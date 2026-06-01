@@ -52,9 +52,10 @@ export const STATUSES = {
 }
 
 export const BREEDS = [
-  'Angus', 'Red Angus', 'Hereford', 'Black Baldy', 'Charolais',
+  'South Poll', 'Angus', 'Red Angus', 'Hereford', 'Black Baldy', 'Charolais',
   'Simmental', 'Gelbvieh', 'Limousin', 'Shorthorn', 'Brangus',
-  'Brahman', 'Wagyu', 'Holstein', 'Crossbred', 'Other',
+  'Brahman', 'Wagyu', 'Holstein', 'Red Devon', 'Pineywoods',
+  'Corriente', 'Crossbred', 'Composite', 'Other',
 ]
 
 // ── Gestation & calving ─────────────────────────────────────────────────────────
@@ -323,4 +324,148 @@ export function calfPerformanceByYear(animals, weightRecordsByAnimal) {
     avgADG: data.adgs.length ? +(data.adgs.reduce((s, a) => s + a, 0) / data.adgs.length).toFixed(2) : null,
     calfCount: data.births.length,
   })).sort((a, b) => a.year - b.year)
+}
+
+// ── Herd ↔ Animal linkage ─────────────────────────────────────────────────────
+// Get all animals assigned to a herd
+export function animalsInHerd(herdId, allAnimals) {
+  return allAnimals.filter(a => a.current_herd_id === herdId && a.status === 'active')
+}
+
+// Calculate herd metrics from assigned animals (real weights)
+// Returns null if no animals assigned — caller falls back to class counts
+export function herdMetricsFromAnimals(herdId, allAnimals, weightRecordsByAnimal, asOf = new Date()) {
+  const assigned = animalsInHerd(herdId, allAnimals)
+  if (assigned.length === 0) return null   // fall back to class counts
+
+  const metrics = calcLiveHerdMetrics(assigned, weightRecordsByAnimal, asOf)
+  return {
+    ...metrics,
+    source: 'records',          // vs 'estimated'
+    animalCount: assigned.length,
+  }
+}
+
+// Decide which metrics to use: real records if available, else class counts
+export function resolveHerdMetrics(herd, allAnimals, weightRecordsByAnimal, asOf = new Date()) {
+  const fromRecords = herdMetricsFromAnimals(herd.id, allAnimals, weightRecordsByAnimal, asOf)
+  if (fromRecords) {
+    return {
+      source: 'records',
+      totalLiveweight: fromRecords.totalLiveweight,
+      dailyDmLbs: fromRecords.dailyDmLbs,
+      headCount: fromRecords.headCount,
+      avgIntakePct: fromRecords.avgIntakePct,
+      breakdown: fromRecords.breakdown,
+    }
+  }
+  // Fall back to stored class-count estimates
+  return {
+    source: 'estimated',
+    totalLiveweight: herd.total_lw || 0,
+    dailyDmLbs: herd.daily_dm || 0,
+    headCount: herd.total_head || 0,
+    avgIntakePct: herd.avg_intake_pct || 0,
+    breakdown: null,
+  }
+}
+
+
+// ── Breed composition (fractions / composites) ────────────────────────────────
+// Composition is an array: [{ breed:'South Poll', pct:75 }, { breed:'Angus', pct:25 }]
+
+// Common fraction symbols
+const FRACTIONS = [
+  [100, ''], [87.5, '⅞'], [75, '¾'], [62.5, '⅝'], [50, '½'],
+  [37.5, '⅜'], [33.33, '⅓'], [25, '¼'], [12.5, '⅛'], [66.67, '⅔'],
+]
+
+export function fractionSymbol(pct) {
+  for (const [val, sym] of FRACTIONS) {
+    if (Math.abs(pct - val) < 0.6) return sym
+  }
+  return null
+}
+
+// Validate a composition totals 100%
+export function compositionValid(composition) {
+  if (!composition || composition.length === 0) return false
+  const total = composition.reduce((s, c) => s + (parseFloat(c.pct) || 0), 0)
+  return Math.abs(total - 100) < 0.5
+}
+
+export function compositionTotal(composition) {
+  if (!composition) return 0
+  return composition.reduce((s, c) => s + (parseFloat(c.pct) || 0), 0)
+}
+
+// Display composition as readable string
+export function compositionDisplay(composition, primaryBreed = null) {
+  if (!composition || composition.length === 0) return primaryBreed || '—'
+  // Sort by pct descending
+  const sorted = [...composition].sort((a, b) => b.pct - a.pct)
+  // If single breed at 100%, just the name
+  if (sorted.length === 1 && Math.abs(sorted[0].pct - 100) < 0.5) return sorted[0].breed
+  // Build "¾ South Poll, ¼ Angus" or "75% South Poll, 25% Angus"
+  return sorted.map(c => {
+    const frac = fractionSymbol(c.pct)
+    return frac ? `${frac} ${c.breed}` : `${Math.round(c.pct)}% ${c.breed}`
+  }).join(', ')
+}
+
+// Short display — just the dominant breed + fraction
+export function compositionShort(composition, primaryBreed = null) {
+  if (!composition || composition.length === 0) return primaryBreed || '—'
+  const sorted = [...composition].sort((a, b) => b.pct - a.pct)
+  const top = sorted[0]
+  if (Math.abs(top.pct - 100) < 0.5) return top.breed
+  const frac = fractionSymbol(top.pct)
+  return frac ? `${frac} ${top.breed}` : `${Math.round(top.pct)}% ${top.breed}`
+}
+
+// Calculate calf composition from dam + sire blends (50/50)
+export function calcCalfComposition(damComposition, sireComposition) {
+  const dam = damComposition && damComposition.length ? damComposition : null
+  const sire = sireComposition && sireComposition.length ? sireComposition : null
+  if (!dam && !sire) return null
+
+  const blend = {}
+  if (dam) dam.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct * 0.5 })
+  else if (sire) {
+    // Unknown dam — can only estimate from sire half
+    sire.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct * 0.5 })
+    blend['Unknown'] = 50
+  }
+  if (sire) sire.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct * 0.5 })
+  else if (dam) {
+    blend['Unknown'] = (blend['Unknown'] || 0) + 50
+  }
+
+  return Object.entries(blend)
+    .map(([breed, pct]) => ({ breed, pct: +pct.toFixed(2) }))
+    .filter(c => c.pct > 0)
+    .sort((a, b) => b.pct - a.pct)
+}
+
+// Herd average composition (for tracking progress toward a target blend)
+export function herdAvgComposition(animals) {
+  const active = animals.filter(a => a.status === 'active')
+  if (active.length === 0) return []
+  const blend = {}
+  let counted = 0
+  active.forEach(a => {
+    let comp = a.breed_composition
+    if (typeof comp === 'string') { try { comp = JSON.parse(comp) } catch { comp = null } }
+    if (comp && comp.length) {
+      comp.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct })
+      counted++
+    } else if (a.breed) {
+      blend[a.breed] = (blend[a.breed] || 0) + 100
+      counted++
+    }
+  })
+  if (counted === 0) return []
+  return Object.entries(blend)
+    .map(([breed, total]) => ({ breed, pct: +(total / counted).toFixed(1) }))
+    .sort((a, b) => b.pct - a.pct)
 }
