@@ -78,7 +78,9 @@ export default function AnimalsTab() {
   const filtered = useMemo(() => {
     let list = animals
     if (filter === 'active') list = list.filter(a => a.status === 'active')
-    else if (['cow','bull','calf','heifer','steer'].includes(filter)) list = list.filter(a => a.sex === filter && a.status === 'active')
+    else if (filter === 'losses') list = list.filter(a => a.status === 'died')
+    else if (filter === 'calf') list = list.filter(a => isCalfSex(a.sex) && a.status === 'active')
+    else if (['cow','bull','heifer','steer'].includes(filter)) list = list.filter(a => a.sex === filter && a.status === 'active')
     if (search) {
       const s = search.toLowerCase()
       list = list.filter(a => a.tag?.toLowerCase().includes(s) || a.name?.toLowerCase().includes(s))
@@ -143,6 +145,26 @@ export default function AnimalsTab() {
     setSelId(a.id); setView('add'); window.scrollTo(0,0)
   }
 
+  // Mark an animal as died (with cause), update dam's breeding record if calf
+  const [deathModal, setDeathModal] = useState(null)  // animal being marked dead
+  async function markDied(animal, date, cause) {
+    try {
+      await updateAnimal(animal.id, { status:'died', status_date:date, status_notes:cause })
+      // If this is a calf with a dam, flag the loss on the dam's breeding record
+      if (isCalfSex(animal.sex) && animal.dam_tag) {
+        const dam = animals.find(x => x.tag === animal.dam_tag)
+        if (dam) {
+          const damBreeding = breeding.filter(b => b.animal_id === dam.id && b.calf_tag === animal.tag)
+          for (const br of damBreeding) {
+            await updateBreeding(br.id, { calf_lost: true })
+          }
+        }
+      }
+      setDeathModal(null)
+      setView('list'); setSelId(null)
+    } catch(e) { alert('Error: ' + e.message) }
+  }
+
   // Promote a calf to its grown classification
   async function promoteAnimal(animalId, newSex) {
     try { await updateAnimal(animalId, { sex: newSex }) }
@@ -152,6 +174,12 @@ export default function AnimalsTab() {
   // Quick herd assignment (no edit needed)
   async function quickAssignHerd(animalId, herdId) {
     try { await updateAnimal(animalId, { current_herd_id: herdId || null }) }
+    catch(e) { alert('Error: ' + e.message) }
+  }
+
+  // Quick sex change (no edit needed)
+  async function quickSetSex(animalId, sex) {
+    try { await updateAnimal(animalId, { sex }) }
     catch(e) { alert('Error: ' + e.message) }
   }
 
@@ -270,7 +298,7 @@ export default function AnimalsTab() {
         {/* Filters */}
         <div className="card" style={{ padding:'0.6rem 0.85rem', marginBottom:'0.75rem' }}>
           <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
-            {['active','cow','bull','heifer','calf','all'].map(f=>(
+            {['active','cow','bull','heifer','calf','losses','all'].map(f=>(
               <button key={f} onClick={()=>setFilter(f)} style={{
                 background: filter===f?'var(--moss)':'var(--bark)',
                 border:`1px solid ${filter===f?'var(--grass)':'var(--bark2)'}`,
@@ -325,16 +353,34 @@ export default function AnimalsTab() {
                   })()} {age!=='—'&&`· ${age}`} {wt&&`· ${wt} lb`} {a.dam_tag&&`· dam ${a.dam_tag}`}
                 </div>
               </div>
-              {!selectMode && (
-                <select
-                  value={a.current_herd_id || ''}
-                  onClick={e=>e.stopPropagation()}
-                  onChange={e=>{ e.stopPropagation(); quickAssignHerd(a.id, e.target.value) }}
-                  style={{ background:'var(--bark)', border:`1px solid ${a.current_herd_id?'var(--moss)':'var(--bark2)'}`, borderRadius:6, color:a.current_herd_id?'var(--grass)':'var(--subtext)', fontFamily:'DM Mono, monospace', fontSize:'0.68rem', padding:'4px 6px', maxWidth:130, cursor:'pointer' }}
-                >
-                  <option value="">— No herd —</option>
-                  {herds.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
-                </select>
+              {!selectMode && a.status === 'died' && (
+                <div style={{ textAlign:'right', fontSize:'0.62rem', color:'var(--alert)', fontFamily:'DM Mono, monospace', maxWidth:160 }}>
+                  ⚰ {a.status_date||'—'}
+                  {a.status_notes && <div style={{ color:'var(--subtext)', marginTop:2 }}>{a.status_notes}</div>}
+                </div>
+              )}
+              {!selectMode && a.status !== 'died' && (
+                <div style={{ display:'flex', flexDirection:'column', gap:4, alignItems:'flex-end' }}>
+                  <select
+                    value={a.sex}
+                    onClick={e=>e.stopPropagation()}
+                    onChange={e=>{ e.stopPropagation(); quickSetSex(a.id, e.target.value) }}
+                    title="Change sex / class"
+                    style={{ background:'var(--bark)', border:'1px solid var(--bark2)', borderRadius:6, color:'var(--cream)', fontFamily:'DM Mono, monospace', fontSize:'0.66rem', padding:'4px 6px', maxWidth:130, cursor:'pointer' }}
+                  >
+                    {Object.entries(SEXES).map(([k,v])=><option key={k} value={k}>{v.icon} {v.label}</option>)}
+                  </select>
+                  <select
+                    value={a.current_herd_id || ''}
+                    onClick={e=>e.stopPropagation()}
+                    onChange={e=>{ e.stopPropagation(); quickAssignHerd(a.id, e.target.value) }}
+                    title="Assign to herd"
+                    style={{ background:'var(--bark)', border:`1px solid ${a.current_herd_id?'var(--moss)':'var(--bark2)'}`, borderRadius:6, color:a.current_herd_id?'var(--grass)':'var(--subtext)', fontFamily:'DM Mono, monospace', fontSize:'0.66rem', padding:'4px 6px', maxWidth:130, cursor:'pointer' }}
+                  >
+                    <option value="">— No herd —</option>
+                    {herds.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+                  </select>
+                </div>
               )}
             </div>
           )
@@ -602,15 +648,15 @@ export default function AnimalsTab() {
         )}
 
         {/* Breeding summary for cows */}
-        {(a.sex==='cow'||a.sex==='heifer') && breedSummary.totalCalves > 0 && (
+        {(a.sex==='cow'||a.sex==='heifer') && breedSummary.calvesBorn > 0 && (
           <div className="card">
             <div className="card-sub mb-2">Breeding Record</div>
             <div className="grid-4">
               {[
-                ['Total Calves', breedSummary.totalCalves],
+                ['Calves Born', breedSummary.calvesBorn],
+                ['Weaned', `${breedSummary.calvesWeaned}${breedSummary.calvesLost?` (${breedSummary.calvesLost} lost)`:''}`],
+                ['Weaning %', breedSummary.weaningRate!=null?`${breedSummary.weaningRate}%`:'—'],
                 ['Avg Interval', breedSummary.avgInterval?`${breedSummary.avgInterval}d`:'—'],
-                ['Rating', breedSummary.intervalRating||'—'],
-                ['Calving Ease', breedSummary.calvingEaseAvg||'—'],
               ].map(([l,v])=>(
                 <div key={l} className="stat-box" style={{ padding:'0.6rem' }}>
                   <div className="stat-val" style={{ fontSize:'0.82rem' }}>{v}</div>
@@ -689,9 +735,19 @@ export default function AnimalsTab() {
           </div>
         )}
 
-        <button className="btn btn-danger btn-sm" onClick={()=>{if(confirm(`Delete ${a.tag}? This removes all records.`)){removeAnimal(a.id);setView('list');setSelId(null)}}}>
-          Delete Animal
-        </button>
+        <div className="flex gap-1" style={{ flexWrap:'wrap' }}>
+          {a.status === 'active' && (
+            <button className="btn btn-secondary btn-sm" onClick={()=>setDeathModal(a)}>⚰ Mark as Died</button>
+          )}
+          <button className="btn btn-danger btn-sm" onClick={()=>{if(confirm(`Delete ${a.tag}? This permanently removes all records. To keep history, use 'Mark as Died' instead.`)){removeAnimal(a.id);setView('list');setSelId(null)}}}>
+            Delete Animal
+          </button>
+        </div>
+
+        {/* Death modal */}
+        {deathModal && (
+          <DeathModal animal={deathModal} onClose={()=>setDeathModal(null)} onConfirm={markDied} />
+        )}
 
         {/* Sub-record modals */}
         {subForm && (
@@ -863,6 +919,43 @@ function SubRecordModal({ type, animal, animals, onClose, onSave }) {
 
         <div className="flex gap-1">
           <button className="btn btn-primary" onClick={handleSave}>✓ Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Death / loss modal ──────────────────────────────────────────────────────────
+function DeathModal({ animal, onClose, onConfirm }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0,10))
+  const [cause, setCause] = useState('')
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:'1rem' }} onClick={onClose}>
+      <div className="card" style={{ maxWidth:420, width:'100%', margin:0 }} onClick={e=>e.stopPropagation()}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'1rem' }}>
+          <div className="card-title">⚰ Mark {animal.tag} as Died</div>
+          <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+        </div>
+        <div className="field" style={{ marginBottom:'0.75rem' }}>
+          <label className="label">Date of Death</label>
+          <input className="input" type="date" value={date} onChange={e=>setDate(e.target.value)} />
+        </div>
+        <div className="field" style={{ marginBottom:'1rem' }}>
+          <label className="label">Cause / Notes</label>
+          <textarea className="textarea" rows={3} value={cause} onChange={e=>setCause(e.target.value)}
+            placeholder="e.g. stillborn, scours, predator, weather, unknown…" />
+        </div>
+        {isCalfSex(animal.sex) && animal.dam_tag && (
+          <div style={{ fontSize:'0.72rem', color:'var(--gold)', marginBottom:'1rem' }}>
+            This calf's dam ({animal.dam_tag}) will be marked as having lost this calf (born but not weaned).
+          </div>
+        )}
+        <div style={{ fontSize:'0.7rem', color:'var(--subtext)', marginBottom:'1rem' }}>
+          The record is kept permanently and will appear under the Losses filter.
+        </div>
+        <div className="flex gap-1">
+          <button className="btn btn-danger" onClick={()=>onConfirm(animal, date, cause)}>⚰ Confirm Death</button>
           <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
         </div>
       </div>
