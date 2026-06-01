@@ -28,6 +28,9 @@ export default function AnimalsTab() {
   const [selId, setSelId]     = useState(null)
   const [filter, setFilter]   = useState('active')  // active | all | cow | bull | calf
   const [search, setSearch]   = useState('')
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [bulkHerd, setBulkHerd] = useState('')
   const [saving, setSaving]   = useState(false)
   const [subForm, setSubForm] = useState(null)      // breeding | weight | bcs | health
 
@@ -132,6 +135,30 @@ export default function AnimalsTab() {
     setSelId(a.id); setView('add'); window.scrollTo(0,0)
   }
 
+  // Quick herd assignment (no edit needed)
+  async function quickAssignHerd(animalId, herdId) {
+    try { await updateAnimal(animalId, { current_herd_id: herdId || null }) }
+    catch(e) { alert('Error: ' + e.message) }
+  }
+
+  function toggleSelect(id) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  async function bulkMoveToHerd() {
+    if (selectedIds.size === 0) { alert('Select animals first'); return }
+    try {
+      for (const id of selectedIds) {
+        await updateAnimal(id, { current_herd_id: bulkHerd || null })
+      }
+      setSelectedIds(new Set()); setSelectMode(false); setBulkHerd('')
+    } catch(e) { alert('Error: ' + e.message) }
+  }
+
   function startAdd(presetSex) {
     const sex = presetSex || 'cow'
     const birthYear = sex === 'calf' ? curYear : curYear - 2
@@ -186,6 +213,26 @@ export default function AnimalsTab() {
           <button className="btn btn-secondary btn-sm" onClick={()=>startAdd('steer')}>+ Steer</button>
         </div>
 
+        {/* Select mode toggle + bulk bar */}
+        <div className="flex gap-1 mb-2" style={{ flexWrap:'wrap', alignItems:'center' }}>
+          <button className={`btn btn-sm ${selectMode?'btn-amber':'btn-secondary'}`} onClick={()=>{setSelectMode(!selectMode);setSelectedIds(new Set())}}>
+            {selectMode ? '✕ Cancel Select' : '☑ Select & Move'}
+          </button>
+          {selectMode && (
+            <>
+              <span style={{ fontSize:'0.75rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace' }}>{selectedIds.size} selected</span>
+              <select className="select" value={bulkHerd} onChange={e=>setBulkHerd(e.target.value)} style={{ maxWidth:170, fontSize:'0.78rem', padding:'5px 10px' }}>
+                <option value="">Move to… (herd)</option>
+                <option value="">— Remove from herd —</option>
+                {herds.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+              </select>
+              <button className="btn btn-primary btn-sm" onClick={bulkMoveToHerd} disabled={selectedIds.size===0}>
+                Move {selectedIds.size>0?selectedIds.size:''}
+              </button>
+            </>
+          )}
+        </div>
+
         {/* Filters */}
         <div className="card" style={{ padding:'0.6rem 0.85rem', marginBottom:'0.75rem' }}>
           <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
@@ -218,9 +265,15 @@ export default function AnimalsTab() {
           const age = ageDisplay(a.birth_date)
           const animalBreed = breeding.filter(b=>b.animal_id===a.id && b.bred_date && !b.actual_calving_date)
           const pendingCalving = animalBreed.length > 0 ? calvingAlert(animalBreed[0].bred_date) : null
+          const isSelected = selectedIds.has(a.id)
           return (
-            <div key={a.id} className="list-item" onClick={()=>{setSelId(a.id);setView('detail')}}>
-              <div style={{ flex:1 }}>
+            <div key={a.id} className="list-item" style={{ background: isSelected?'rgba(58,122,40,0.12)':undefined }}>
+              {selectMode && (
+                <input type="checkbox" checked={isSelected} onChange={()=>toggleSelect(a.id)}
+                  style={{ width:18, height:18, marginRight:8, cursor:'pointer', accentColor:'var(--grass)' }} />
+              )}
+              <div style={{ flex:1, cursor: selectMode?'pointer':'pointer' }}
+                onClick={()=> selectMode ? toggleSelect(a.id) : (setSelId(a.id),setView('detail'))}>
                 <div className="flex gap-1" style={{ alignItems:'center', marginBottom:'0.2rem', flexWrap:'wrap' }}>
                   <span style={{ fontSize:'1.05rem' }}>{sexInfo.icon}</span>
                   <strong style={{ color:'var(--cream)', fontFamily:'DM Mono, monospace' }}>{a.tag}</strong>
@@ -238,7 +291,17 @@ export default function AnimalsTab() {
                   })()} {age!=='—'&&`· ${age}`} {wt&&`· ${wt} lb`} {a.dam_tag&&`· dam ${a.dam_tag}`}
                 </div>
               </div>
-              <span style={{ color:'var(--grass)', fontSize:'0.72rem' }}>→</span>
+              {!selectMode && (
+                <select
+                  value={a.current_herd_id || ''}
+                  onClick={e=>e.stopPropagation()}
+                  onChange={e=>{ e.stopPropagation(); quickAssignHerd(a.id, e.target.value) }}
+                  style={{ background:'var(--bark)', border:`1px solid ${a.current_herd_id?'var(--moss)':'var(--bark2)'}`, borderRadius:6, color:a.current_herd_id?'var(--grass)':'var(--subtext)', fontFamily:'DM Mono, monospace', fontSize:'0.68rem', padding:'4px 6px', maxWidth:130, cursor:'pointer' }}
+                >
+                  <option value="">— No herd —</option>
+                  {herds.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+                </select>
+              )}
             </div>
           )
         })}
