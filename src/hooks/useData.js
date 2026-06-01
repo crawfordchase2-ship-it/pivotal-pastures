@@ -71,6 +71,13 @@ export const useDailyRecs     = () => useTable('daily_recommendations', 'date', 
 export const useForageInventory = () => useTable('forage_inventory', 'created_at', false)
 export const useCameraConnections = () => useTable('camera_connections', 'created_at', false)
 
+// ── Animal record hooks ───────────────────────────────────────────────────────
+export const useAnimals          = () => useTable('animals',          'tag',  true)
+export const useBreedingRecords  = () => useTable('breeding_records', 'bred_date', false)
+export const useWeightRecords    = () => useTable('weight_records',   'date', false)
+export const useBcsRecords       = () => useTable('bcs_records',      'date', false)
+export const useHealthRecords    = () => useTable('health_records',   'date', false)
+
 // ── Field positions (one per machine, unique) ─────────────────────────────────
 export function useFieldPositions() {
   const { user } = useAuth()
