@@ -196,11 +196,14 @@ export default function HerdsTab() {
                       </div>
                     ))}
                   </div>
-                  {live.estimatedCount > 0 && (
-                    <div style={{ fontSize:'0.68rem', color:'var(--gold)', marginTop:'0.5rem' }}>
-                      ⚠ {live.estimatedCount} animal{live.estimatedCount>1?'s':''} using default weights — add weight records in the Animals tab for accuracy.
-                    </div>
-                  )}
+                  {live.estimatedCount > 0 && (() => {
+                    const needTags = assigned.filter(an => (weightsByAnimal[an.id]||[]).length === 0 && !an.birth_weight).map(an => an.tag)
+                    return (
+                      <div style={{ fontSize:'0.68rem', color:'var(--gold)', marginTop:'0.5rem' }}>
+                        ⚠ {live.estimatedCount} using default weights{needTags.length?': ':''}<strong style={{fontFamily:'DM Mono, monospace'}}>{needTags.join(', ')}</strong>. In the <strong style={{color:'var(--grass)'}}>Animals</strong> tab, use the <strong>⚖ Needs Weight</strong> filter to find them, then add a weight (or just type Current Weight when editing).
+                      </div>
+                    )
+                  })()}
                   <div style={{ fontSize:'0.68rem', color:'var(--subtext)', marginTop:'0.5rem' }}>
                     When animals are assigned, the herd uses these live numbers for grazing. The manual class counts below are only used if no animals are assigned.
                   </div>
@@ -488,11 +491,15 @@ export default function HerdsTab() {
                             {d.count} {d.label}
                           </span>
                         ))}
-                        {liveMetrics.estimatedCount > 0 && (
-                          <span style={{ background:'rgba(240,192,64,0.1)', borderRadius:6, padding:'3px 9px', fontSize:'0.6rem', fontFamily:'DM Mono, monospace', color:'var(--gold)', border:'1px solid rgba(240,192,64,0.3)' }}>
-                            {liveMetrics.estimatedCount} need weights
-                          </span>
-                        )}
+                        {liveMetrics.estimatedCount > 0 && (() => {
+                          const needTags = assigned.filter(an => (weightsByAnimal[an.id]||[]).length === 0 && !an.birth_weight).map(an => an.tag)
+                          return (
+                            <span style={{ background:'rgba(240,192,64,0.1)', borderRadius:6, padding:'3px 9px', fontSize:'0.6rem', fontFamily:'DM Mono, monospace', color:'var(--gold)', border:'1px solid rgba(240,192,64,0.3)' }}
+                              title={needTags.length ? 'Need weights: ' + needTags.join(', ') : ''}>
+                              ⚖ {needTags.length ? needTags.slice(0,6).join(', ') + (needTags.length>6?` +${needTags.length-6}`:'') : liveMetrics.estimatedCount + ' need weights'}
+                            </span>
+                          )
+                        })()}
                       </div>
                     )
                   })()}
