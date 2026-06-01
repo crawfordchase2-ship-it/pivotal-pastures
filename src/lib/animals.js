@@ -227,48 +227,95 @@ export function bcsTrend(bcsRecords) {
 }
 
 // ── Live herd weight & DM (drives grazing math) ──────────────────────────────────
+// Default weights by class when no weight record exists (so animals still count)
+export const DEFAULT_WEIGHTS = {
+  cow: 1200, bull: 1800, heifer: 750, steer: 750,
+  calf: 300, bull_calf: 300, heifer_calf: 300, steer_calf: 300,
+}
+
 export function calcLiveHerdMetrics(animals, weightRecordsByAnimal, asOf = new Date()) {
   let totalLW = 0
   let totalDM = 0
   let headCount = 0
-  const breakdown = { cow: 0, bull: 0, heifer: 0, steer: 0, calf: 0 }
+  let estimatedCount = 0   // how many used a default weight
+  const breakdown = {}     // sex → count
 
   animals.filter(a => a.status === 'active').forEach(animal => {
     const records = weightRecordsByAnimal[animal.id] || []
     let weight = currentWeight(animal, records, asOf)
+    let isEstimate = false
 
     if (isCalfSex(animal.sex)) {
       const age = ageInDays(animal.birth_date, asOf)
-      weight = weight || estimateCalfWeight(animal.birth_weight, age, 2.0)
-      const rate = calfIntakeRate(age)
-      if (weight) {
-        totalLW += weight
-        totalDM += weight * rate
+      if (!weight) {
+        weight = estimateCalfWeight(animal.birth_weight, age, 2.0) || DEFAULT_WEIGHTS[animal.sex] || 300
+        isEstimate = true
       }
+      const rate = calfIntakeRate(age != null ? age : 120)
+      totalLW += weight
+      totalDM += weight * rate
     } else {
       const sexInfo = SEXES[animal.sex] || SEXES.cow
-      // Lactating cow gets higher rate
       let rate = sexInfo.intakePct / 100
       if (animal.sex === 'cow' && animal.lactating) rate = 0.031
-      if (weight) {
-        totalLW += weight
-        totalDM += weight * rate
+      if (!weight) {
+        weight = DEFAULT_WEIGHTS[animal.sex] || 1000
+        isEstimate = true
       }
+      totalLW += weight
+      totalDM += weight * rate
     }
 
-    if (weight) {
-      headCount++
-      breakdown[animal.sex] = (breakdown[animal.sex] || 0) + 1
-    }
+    headCount++
+    if (isEstimate) estimatedCount++
+    breakdown[animal.sex] = (breakdown[animal.sex] || 0) + 1
   })
 
   return {
     totalLiveweight: Math.round(totalLW),
     dailyDmLbs: Math.round(totalDM),
     headCount,
+    estimatedCount,           // animals using default weights (no record)
     avgIntakePct: totalLW > 0 ? +((totalDM / totalLW) * 100).toFixed(2) : 0,
     breakdown,
   }
+}
+
+// Human-readable breakdown: "4 cows, 3 calves, 1 bull"
+export function breakdownSummary(breakdown) {
+  const labels = {
+    cow:'cow', bull:'bull', heifer:'heifer', steer:'steer',
+    calf:'calf', bull_calf:'bull calf', heifer_calf:'heifer calf', steer_calf:'steer calf',
+  }
+  // Group all calf types together for a clean summary
+  const grouped = {}
+  Object.entries(breakdown).forEach(([sex, n]) => {
+    if (!n) return
+    const key = ['bull_calf','heifer_calf','steer_calf','calf'].includes(sex) ? 'calf' : sex
+    grouped[key] = (grouped[key] || 0) + n
+  })
+  const order = ['cow','bull','heifer','steer','calf']
+  return order
+    .filter(k => grouped[k])
+    .map(k => {
+      const n = grouped[k]
+      const label = labels[k]
+      const plural = n === 1 ? label : (label.endsWith('f') ? label.slice(0,-1)+'ves' : label+'s')
+      return `${n} ${plural}`
+    })
+    .join(', ')
+}
+
+// Detailed breakdown keeping calf sexes separate
+export function breakdownDetailed(breakdown) {
+  const labels = {
+    cow:'Cows', bull:'Bulls', heifer:'Heifers', steer:'Steers',
+    calf:'Calves', bull_calf:'Bull Calves', heifer_calf:'Heifer Calves', steer_calf:'Steer Calves',
+  }
+  const order = ['cow','bull','heifer','steer','heifer_calf','bull_calf','steer_calf','calf']
+  return order
+    .filter(k => breakdown[k])
+    .map(k => ({ label: labels[k], count: breakdown[k], sex: k }))
 }
 
 // ── Breeding summary per cow (lifetime productivity) ──────────────────────────────
