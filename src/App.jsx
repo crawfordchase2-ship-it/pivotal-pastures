@@ -11,9 +11,10 @@ import InventoryTab     from './components/InventoryTab'
 import RotationsTab     from './components/RotationsTab'
 import ReportsTab       from './components/ReportsTab'
 import SettingsTab      from './components/SettingsTab'
+import AnimalsTab       from './components/AnimalsTab'
 
 // ── App version ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v3.01'
+const APP_VERSION = 'v3.10'
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
@@ -24,6 +25,7 @@ const TABS = [
   { id: 'rotations', label: 'Rotations', icon: '🌀' },
   { id: 'machines',  label: 'Machines',  icon: '⚙️' },
   { id: 'herds',     label: 'Herds',     icon: '🐄' },
+  { id: 'animals',   label: 'Animals',   icon: '🐮' },
   { id: 'reports',   label: 'Reports',   icon: '📋' },
   { id: 'settings',  label: 'Settings',  icon: '🔧' },
 ]
@@ -80,6 +82,7 @@ export default function App() {
         {tab === 'rotations'  && <RotationsTab />}
         {tab === 'machines'   && <MachinesTab />}
         {tab === 'herds'      && <HerdsTab />}
+        {tab === 'animals'    && <AnimalsTab />}
         {tab === 'reports'    && <ReportsTab />}
         {tab === 'settings'   && <SettingsTab />}
       </main>
