@@ -228,6 +228,18 @@ export default function AnimalsTab() {
     const calfCount= animals.filter(a=>isCalfSex(a.sex)&&a.status==='active').length
     const totalActive = animals.filter(a=>a.status==='active').length
 
+    // Diagnostic: full breakdown + data-quality checks
+    const byStatus = {}
+    animals.forEach(a => { byStatus[a.status||'(none)'] = (byStatus[a.status||'(none)']||0)+1 })
+    const bySex = {}
+    animals.filter(a=>a.status==='active').forEach(a => { bySex[a.sex||'(none)'] = (bySex[a.sex||'(none)']||0)+1 })
+    // Duplicate tags
+    const tagCounts = {}
+    animals.forEach(a => { const tg=(a.tag||'').trim(); if(tg) tagCounts[tg]=(tagCounts[tg]||0)+1 })
+    const dupTags = Object.entries(tagCounts).filter(([t,n])=>n>1).map(([t,n])=>`${t} (${n}×)`)
+    // Calving records with no calf created
+    const calvingsNoCalf = breeding.filter(b => b.actual_calving_date && (!b.calf_tag || !animals.find(a=>a.tag===b.calf_tag)))
+
     return (
       <div>
         <div className="section-heading">Animal Records</div>
@@ -276,6 +288,28 @@ export default function AnimalsTab() {
             <div key={l} className="stat-box"><div className="stat-val">{v}</div><div className="stat-lbl">{l}</div></div>
           ))}
         </div>
+
+        {/* Count diagnostic — helps find missing/miscounted animals */}
+        <details className="card" style={{ marginBottom:'0.75rem' }}>
+          <summary style={{ cursor:'pointer', fontSize:'0.78rem', color:'var(--grass)', fontFamily:'DM Mono, monospace' }}>
+            🔎 Count Check — total records: {animals.length}
+          </summary>
+          <div style={{ marginTop:'0.6rem', fontSize:'0.72rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace', lineHeight:1.7 }}>
+            <div><strong style={{color:'var(--cream)'}}>By status:</strong> {Object.entries(byStatus).map(([s,n])=>`${s}: ${n}`).join('  ·  ')}</div>
+            <div><strong style={{color:'var(--cream)'}}>Active by sex:</strong> {Object.entries(bySex).map(([s,n])=>`${(SEXES[s]?.label||s)}: ${n}`).join('  ·  ')}</div>
+            {dupTags.length > 0 && (
+              <div style={{ color:'var(--alert)', marginTop:'0.4rem' }}>⚠ Duplicate tags: {dupTags.join(', ')}</div>
+            )}
+            {calvingsNoCalf.length > 0 && (
+              <div style={{ color:'var(--gold)', marginTop:'0.4rem' }}>
+                ⚠ {calvingsNoCalf.length} calving record{calvingsNoCalf.length>1?'s':''} with no matching calf animal (calf tag blank or doesn't exist). These calvings logged on the cow but never created a calf record.
+              </div>
+            )}
+            {dupTags.length===0 && calvingsNoCalf.length===0 && (
+              <div style={{ color:'var(--grass)', marginTop:'0.4rem' }}>✓ No duplicate tags, no orphan calvings.</div>
+            )}
+          </div>
+        </details>
 
         {/* Add buttons */}
         <div className="flex gap-1 mb-2" style={{ flexWrap:'wrap' }}>
