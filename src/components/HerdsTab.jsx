@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { useHerds } from '../hooks/useData'
+import { useHerds, useAnimals, useWeightRecords } from '../hooks/useData'
+import { resolveHerdMetrics, animalsInHerd } from '../lib/animals.js'
 
 // ── Animal class library ───────────────────────────────────────────────────────
 const ANIMAL_CLASSES = [
@@ -65,6 +66,15 @@ function calcHerdTotals(classes) {
 
 export default function HerdsTab() {
   const { data: herds, insert, update, remove, loading } = useHerds()
+  const { data: animals } = useAnimals()
+  const { data: weightRecords } = useWeightRecords()
+
+  // Map weight records by animal for live herd metrics
+  const weightsByAnimal = {}
+  weightRecords.forEach(w => {
+    if (!weightsByAnimal[w.animal_id]) weightsByAnimal[w.animal_id] = []
+    weightsByAnimal[w.animal_id].push(w)
+  })
 
   const [form, setForm]         = useState({ name: '', notes: '' })
   const [classes, setClasses]   = useState([])
@@ -94,7 +104,7 @@ export default function HerdsTab() {
   }
 
   async function save() {
-    if (!form.name.trim() || classes.length === 0) return
+    if (!form.name.trim()) { alert('Herd name is required'); return }
     setSaving(true)
     try {
       const row = {
@@ -108,6 +118,7 @@ export default function HerdsTab() {
         // Legacy fields for compatibility
         pairs:         classes.find(c => c.classType === 'cow_calf_pair')?.count || 0,
         avg_weight:    classes[0]?.avgWeight || 0,
+        total_lw:      classes.length ? Math.round(totals.totalLW) : 0,
       }
       if (editing) await update(editing, row)
       else await insert(row)
@@ -390,7 +401,7 @@ export default function HerdsTab() {
 
             <hr className="divider" />
             <div className="flex gap-1">
-              <button className="btn btn-primary" onClick={save} disabled={saving || classes.length === 0}>
+              <button className="btn btn-primary" onClick={save} disabled={saving}>
                 {saving ? <><span className="spinner" /> Saving…</> : editing ? '✓ Update Herd' : '+ Save Herd'}
               </button>
               {editing && (
@@ -415,13 +426,27 @@ export default function HerdsTab() {
               ? (typeof h.classes === 'string' ? JSON.parse(h.classes) : h.classes)
               : []
             const t = calcHerdTotals(savedClasses)
+            const assigned = animalsInHerd(h.id, animals)
+            const resolved = resolveHerdMetrics(h, animals, weightsByAnimal)
+            const isLinked = resolved.source === 'records'
             return (
               <div className="list-item" key={h.id} onClick={() => editHerd(h)}>
                 <div style={{ flex: 1 }}>
                   <div className="flex gap-1" style={{ alignItems: 'center', marginBottom: '0.3rem' }}>
                     <strong style={{ color: 'var(--cream)' }}>{h.name}</strong>
-                    <span className="badge">{h.total_head || t.totalHead} head</span>
+                    <span className="badge">{isLinked ? resolved.headCount : (h.total_head || t.totalHead)} head</span>
+                    {isLinked
+                      ? <span className="badge" style={{ borderColor:'var(--grass)', color:'var(--grass)' }}>🔗 from records</span>
+                      : <span className="badge" style={{ borderColor:'var(--subtext)', color:'var(--subtext)' }}>✎ estimated</span>}
                   </div>
+                  {isLinked && assigned.length > 0 && (
+                    <div style={{ display:'flex', gap:4, flexWrap:'wrap', marginBottom:'0.4rem' }}>
+                      {assigned.slice(0,12).map(a => (
+                        <span key={a.id} style={{ background:'rgba(58,122,40,0.15)', borderRadius:5, padding:'2px 6px', fontSize:'0.58rem', fontFamily:'DM Mono, monospace', color:'var(--grass)', border:'1px solid var(--moss)' }}>{a.tag}</span>
+                      ))}
+                      {assigned.length > 12 && <span style={{ fontSize:'0.58rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace' }}>+{assigned.length-12} more</span>}
+                    </div>
+                  )}
 
                   {/* Class pills */}
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: '0.4rem' }}>
@@ -436,9 +461,9 @@ export default function HerdsTab() {
                   </div>
 
                   <div style={{ fontSize: '0.72rem', color: 'var(--subtext)', fontFamily: 'DM Mono, monospace' }}>
-                    LW: {(h.total_lw || t.totalLW).toLocaleString()} lb
-                    {' · '}Avg intake: {(h.avg_intake_pct || t.avgIntake).toFixed(2)}%
-                    {' · '}DM: {(h.daily_dm || Math.round(t.totalDM)).toLocaleString()} lb/day
+                    LW: {(isLinked ? resolved.totalLiveweight : (h.total_lw || t.totalLW)).toLocaleString()} lb
+                    {' · '}Avg intake: {(isLinked ? resolved.avgIntakePct : (h.avg_intake_pct || t.avgIntake)).toFixed(2)}%
+                    {' · '}DM: {(isLinked ? resolved.dailyDmLbs : (h.daily_dm || Math.round(t.totalDM))).toLocaleString()} lb/day
                   </div>
                 </div>
                 <button className="btn btn-danger btn-sm" onClick={e => { e.stopPropagation(); remove(h.id) }}>✕</button>
