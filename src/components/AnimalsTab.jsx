@@ -79,6 +79,7 @@ export default function AnimalsTab() {
     let list = animals
     if (filter === 'active') list = list.filter(a => a.status === 'active')
     else if (filter === 'losses') list = list.filter(a => a.status === 'died')
+    else if (filter === 'needs_weight') list = list.filter(a => a.status === 'active' && (weights.filter(w => w.animal_id === a.id).length === 0) && !a.birth_weight)
     else if (filter === 'calf') list = list.filter(a => isCalfSex(a.sex) && a.status === 'active')
     else if (['cow','bull','heifer','steer'].includes(filter)) list = list.filter(a => a.sex === filter && a.status === 'active')
     if (search) {
@@ -308,14 +309,14 @@ export default function AnimalsTab() {
         {/* Filters */}
         <div className="card" style={{ padding:'0.6rem 0.85rem', marginBottom:'0.75rem' }}>
           <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
-            {['active','cow','bull','heifer','calf','losses','all'].map(f=>(
+            {['active','cow','bull','heifer','calf','needs_weight','losses','all'].map(f=>(
               <button key={f} onClick={()=>setFilter(f)} style={{
                 background: filter===f?'var(--moss)':'var(--bark)',
                 border:`1px solid ${filter===f?'var(--grass)':'var(--bark2)'}`,
                 borderRadius:6, padding:'4px 11px', cursor:'pointer',
                 color: filter===f?'var(--white)':'var(--subtext)',
                 fontFamily:'DM Mono, monospace', fontSize:'0.68rem', textTransform:'capitalize',
-              }}>{f}</button>
+              }}>{f==='needs_weight'?'⚖ Needs Weight':f}</button>
             ))}
             <input className="input" placeholder="Search tag/name…" value={search} onChange={e=>setSearch(e.target.value)}
               style={{ maxWidth:160, marginLeft:'auto', fontSize:'0.78rem', padding:'5px 10px' }} />
