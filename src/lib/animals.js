@@ -329,7 +329,13 @@ export function calfPerformanceByYear(animals, weightRecordsByAnimal) {
 // ── Herd ↔ Animal linkage ─────────────────────────────────────────────────────
 // Get all animals assigned to a herd
 export function animalsInHerd(herdId, allAnimals) {
-  return allAnimals.filter(a => a.current_herd_id === herdId && a.status === 'active')
+  if (!herdId) return []
+  const target = String(herdId).trim()
+  return allAnimals.filter(a => {
+    if (a.status !== 'active') return false
+    if (!a.current_herd_id) return false
+    return String(a.current_herd_id).trim() === target
+  })
 }
 
 // Calculate herd metrics from assigned animals (real weights)
