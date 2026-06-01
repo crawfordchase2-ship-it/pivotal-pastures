@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useHerds, useAnimals, useWeightRecords } from '../hooks/useData'
-import { resolveHerdMetrics, animalsInHerd } from '../lib/animals.js'
+import { resolveHerdMetrics, animalsInHerd, calcLiveHerdMetrics, breakdownSummary, breakdownDetailed } from '../lib/animals.js'
 
 // ── Animal class library ───────────────────────────────────────────────────────
 const ANIMAL_CLASSES = [
@@ -169,8 +169,48 @@ export default function HerdsTab() {
               </div>
             </div>
 
-            {/* ── Animal classes list ── */}
-            <div className="card-sub mb-2">Animal Classes</div>
+            {/* ── Assigned animals from records ── */}
+            {editing && (() => {
+              const assigned = animalsInHerd(editing, animals)
+              if (assigned.length === 0) return (
+                <div style={{ background:'var(--bark)', borderRadius:8, padding:'0.75rem', marginBottom:'1rem', fontSize:'0.78rem', color:'var(--subtext)' }}>
+                  No individual animals assigned yet. Assign them from the <strong style={{color:'var(--grass)'}}>Animals</strong> tab (use the herd dropdown on each animal), or use the manual class counts below for an estimate.
+                </div>
+              )
+              const live = calcLiveHerdMetrics(assigned, weightsByAnimal)
+              const detailed = breakdownDetailed(live.breakdown)
+              return (
+                <div style={{ background:'rgba(58,122,40,0.08)', border:'1px solid var(--moss)', borderRadius:8, padding:'0.85rem', marginBottom:'1rem' }}>
+                  <div className="card-sub mb-2" style={{ color:'var(--grass)' }}>🔗 Assigned Animals ({live.headCount} head — live from records)</div>
+                  <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginBottom:'0.6rem' }}>
+                    {detailed.map(d => (
+                      <span key={d.sex} style={{ background:'var(--bark)', borderRadius:6, padding:'3px 10px', fontSize:'0.7rem', fontFamily:'DM Mono, monospace', color:'var(--grass)', border:'1px solid var(--moss)' }}>
+                        {d.count} {d.label}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="grid-4">
+                    {[['Head',live.headCount],['Total LW',live.totalLiveweight.toLocaleString()+' lb'],['Avg Intake',live.avgIntakePct+'%'],['Daily DM',live.dailyDmLbs.toLocaleString()+' lb']].map(([l,v])=>(
+                      <div key={l} className="stat-box" style={{ padding:'0.5rem' }}>
+                        <div className="stat-val" style={{ fontSize:'0.85rem' }}>{v}</div>
+                        <div className="stat-lbl" style={{ fontSize:'0.5rem' }}>{l}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {live.estimatedCount > 0 && (
+                    <div style={{ fontSize:'0.68rem', color:'var(--gold)', marginTop:'0.5rem' }}>
+                      ⚠ {live.estimatedCount} animal{live.estimatedCount>1?'s':''} using default weights — add weight records in the Animals tab for accuracy.
+                    </div>
+                  )}
+                  <div style={{ fontSize:'0.68rem', color:'var(--subtext)', marginTop:'0.5rem' }}>
+                    When animals are assigned, the herd uses these live numbers for grazing. The manual class counts below are only used if no animals are assigned.
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* ── Animal classes list (manual estimate) ── */}
+            <div className="card-sub mb-2">Manual Class Counts (estimate — used only if no animals assigned)</div>
 
             {classes.length === 0 && (
               <div style={{ textAlign: 'center', padding: '1rem', color: 'var(--subtext)', fontSize: '0.82rem', marginBottom: '0.75rem' }}>
@@ -439,14 +479,24 @@ export default function HerdsTab() {
                       ? <span className="badge" style={{ borderColor:'var(--grass)', color:'var(--grass)' }}>🔗 from records</span>
                       : <span className="badge" style={{ borderColor:'var(--subtext)', color:'var(--subtext)' }}>✎ estimated</span>}
                   </div>
-                  {isLinked && assigned.length > 0 && (
-                    <div style={{ display:'flex', gap:4, flexWrap:'wrap', marginBottom:'0.4rem' }}>
-                      {assigned.slice(0,12).map(a => (
-                        <span key={a.id} style={{ background:'rgba(58,122,40,0.15)', borderRadius:5, padding:'2px 6px', fontSize:'0.58rem', fontFamily:'DM Mono, monospace', color:'var(--grass)', border:'1px solid var(--moss)' }}>{a.tag}</span>
-                      ))}
-                      {assigned.length > 12 && <span style={{ fontSize:'0.58rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace' }}>+{assigned.length-12} more</span>}
-                    </div>
-                  )}
+                  {isLinked && assigned.length > 0 && (() => {
+                    const liveMetrics = calcLiveHerdMetrics(assigned, weightsByAnimal)
+                    const detailed = breakdownDetailed(liveMetrics.breakdown)
+                    return (
+                      <div style={{ display:'flex', gap:5, flexWrap:'wrap', marginBottom:'0.4rem' }}>
+                        {detailed.map(d => (
+                          <span key={d.sex} style={{ background:'rgba(58,122,40,0.15)', borderRadius:6, padding:'3px 9px', fontSize:'0.65rem', fontFamily:'DM Mono, monospace', color:'var(--grass)', border:'1px solid var(--moss)' }}>
+                            {d.count} {d.label}
+                          </span>
+                        ))}
+                        {liveMetrics.estimatedCount > 0 && (
+                          <span style={{ background:'rgba(240,192,64,0.1)', borderRadius:6, padding:'3px 9px', fontSize:'0.6rem', fontFamily:'DM Mono, monospace', color:'var(--gold)', border:'1px solid rgba(240,192,64,0.3)' }}>
+                            {liveMetrics.estimatedCount} need weights
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })()}
 
                   {/* Class pills */}
                   <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: '0.4rem' }}>
