@@ -9,7 +9,7 @@ import {
   cowBreedingSummary, getOffspring, getDam, getSire,
   withdrawalStatus, upcomingVaccinations, bcsTrend, bcsColor, BCS_LABELS,
   calfPerformanceByYear, compositionValid, compositionTotal, compositionDisplay,
-  compositionShort, calcCalfComposition,
+  compositionShort, calcCalfComposition, isCalfSex, promotionSuggestion, PROMOTION_MAP, CALF_SEXES,
 } from '../lib/animals.js'
 
 const today = () => new Date().toISOString().slice(0,10)
@@ -86,6 +86,14 @@ export default function AnimalsTab() {
     return list
   }, [animals, filter, search])
 
+  // Promotions due (calves past weaning)
+  const promotionsDue = useMemo(() => {
+    return animals
+      .filter(a => a.status === 'active')
+      .map(a => ({ animal: a, promo: promotionSuggestion(a) }))
+      .filter(x => x.promo)
+  }, [animals])
+
   // Calving alerts across herd
   const calvingAlerts = useMemo(() => {
     return breeding
@@ -135,6 +143,12 @@ export default function AnimalsTab() {
     setSelId(a.id); setView('add'); window.scrollTo(0,0)
   }
 
+  // Promote a calf to its grown classification
+  async function promoteAnimal(animalId, newSex) {
+    try { await updateAnimal(animalId, { sex: newSex }) }
+    catch(e) { alert('Error: ' + e.message) }
+  }
+
   // Quick herd assignment (no edit needed)
   async function quickAssignHerd(animalId, herdId) {
     try { await updateAnimal(animalId, { current_herd_id: herdId || null }) }
@@ -161,7 +175,7 @@ export default function AnimalsTab() {
 
   function startAdd(presetSex) {
     const sex = presetSex || 'cow'
-    const birthYear = sex === 'calf' ? curYear : curYear - 2
+    const birthYear = ['calf','bull_calf','heifer_calf','steer_calf'].includes(sex) ? curYear : curYear - 2
     setForm({ ...emptyAnimal, sex, tag: suggestNextTag(allTags, birthYear) })
     setSelId(null); setView('add'); window.scrollTo(0,0)
   }
@@ -172,7 +186,7 @@ export default function AnimalsTab() {
   if (view === 'list') {
     const cowCount = animals.filter(a=>a.sex==='cow'&&a.status==='active').length
     const bullCount= animals.filter(a=>a.sex==='bull'&&a.status==='active').length
-    const calfCount= animals.filter(a=>a.sex==='calf'&&a.status==='active').length
+    const calfCount= animals.filter(a=>isCalfSex(a.sex)&&a.status==='active').length
     const totalActive = animals.filter(a=>a.status==='active').length
 
     return (
@@ -197,6 +211,26 @@ export default function AnimalsTab() {
           </div>
         )}
 
+        {/* Promotions due */}
+        {promotionsDue.length > 0 && (
+          <div className="card" style={{ border:'1px solid var(--grass)', background:'rgba(110,192,64,0.05)' }}>
+            <div className="card-sub mb-2" style={{ color:'var(--grass)' }}>🐄 Ready to Promote (past weaning)</div>
+            {promotionsDue.slice(0,8).map(({animal,promo},i)=>(
+              <div key={i} className="list-item" style={{ padding:'0.5rem 0' }}>
+                <div onClick={()=>{setSelId(animal.id);setView('detail')}} style={{ cursor:'pointer', flex:1 }}>
+                  <span style={{ fontFamily:'DM Mono, monospace', color:'var(--cream)', fontWeight:600 }}>{animal.tag}</span>
+                  <span style={{ color:'var(--subtext)', marginLeft:6, fontSize:'0.72rem' }}>{promo.fromLabel} · {promo.age}d old</span>
+                </div>
+                <div className="flex gap-1">
+                  {promo.options.map((opt,oi)=>(
+                    <button key={opt} className="btn btn-primary btn-sm" onClick={()=>promoteAnimal(animal.id, opt)}>→ {promo.optionLabels[oi]}</button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Summary stats */}
         <div className="grid-4 mb-2">
           {[['Cows',cowCount],['Bulls',bullCount],['Calves',calfCount],['Total Active',totalActive]].map(([l,v])=>(
@@ -209,7 +243,7 @@ export default function AnimalsTab() {
           <button className="btn btn-primary btn-sm" onClick={()=>startAdd('cow')}>+ Cow</button>
           <button className="btn btn-primary btn-sm" onClick={()=>startAdd('bull')}>+ Bull</button>
           <button className="btn btn-primary btn-sm" onClick={()=>startAdd('heifer')}>+ Heifer</button>
-          <button className="btn btn-primary btn-sm" onClick={()=>startAdd('calf')}>+ Calf</button>
+          <button className="btn btn-primary btn-sm" onClick={()=>startAdd('heifer_calf')}>+ Calf</button>
           <button className="btn btn-secondary btn-sm" onClick={()=>startAdd('steer')}>+ Steer</button>
         </div>
 
@@ -483,6 +517,7 @@ export default function AnimalsTab() {
     const upcomingVax = upcomingVaccinations(animalHealth)
     const bcsT = bcsTrend(animalBcs)
     const latestBcs = animalBcs[0]
+    const promo = promotionSuggestion(a)
 
     return (
       <div>
@@ -498,6 +533,22 @@ export default function AnimalsTab() {
         {wd && !wd.clear && (
           <div style={{ background:'rgba(224,64,48,0.15)', border:'1px solid var(--alert)', borderRadius:8, padding:'0.7rem 1rem', marginBottom:'0.75rem', color:'var(--alert)', fontSize:'0.82rem' }}>
             ⚠ {wd.msg}
+          </div>
+        )}
+
+        {/* Promotion suggestion */}
+        {promo && (
+          <div style={{ background:'rgba(110,192,64,0.1)', border:'1px solid var(--grass)', borderRadius:8, padding:'0.7rem 1rem', marginBottom:'0.75rem' }}>
+            <div style={{ color:'var(--grass)', fontSize:'0.82rem', marginBottom:'0.5rem' }}>
+              🐄 This {promo.fromLabel.toLowerCase()} is {promo.age} days old (past weaning). Promote to:
+            </div>
+            <div className="flex gap-1" style={{ flexWrap:'wrap' }}>
+              {promo.options.map((opt,i)=>(
+                <button key={opt} className="btn btn-primary btn-sm" onClick={()=>promoteAnimal(a.id, opt)}>
+                  → {promo.optionLabels[i]}
+                </button>
+              ))}
+            </div>
           </div>
         )}
 
@@ -656,10 +707,18 @@ export default function AnimalsTab() {
                   const created = await insertBreeding(rec)
                   // Auto-create calf if calving recorded
                   if (data.actual_calving_date && data.calf_tag) {
+                    // Compute calf breed composition from dam + sire
+                    const damComp = a.breed_composition ? (typeof a.breed_composition==='string'?JSON.parse(a.breed_composition):a.breed_composition) : (a.breed?[{breed:a.breed,pct:100}]:null)
+                    const sireAnimal = animals.find(x => x.tag === data.bull_tag)
+                    const sireComp = sireAnimal?.breed_composition ? (typeof sireAnimal.breed_composition==='string'?JSON.parse(sireAnimal.breed_composition):sireAnimal.breed_composition) : (sireAnimal?.breed?[{breed:sireAnimal.breed,pct:100}]:null)
+                    const calfComp = calcCalfComposition(damComp, sireComp)
                     await insertAnimal({
-                      tag: data.calf_tag, sex:'calf', breed:a.breed,
+                      tag: data.calf_tag, sex: data.calf_sex || 'calf', breed: calfComp?calfComp[0].breed:a.breed,
+                      breed_composition: calfComp ? JSON.stringify(calfComp) : null,
                       birth_date: data.actual_calving_date,
+                      birth_weight: data.calf_birth_weight ? +data.calf_birth_weight : null,
                       dam_tag: a.tag, sire_tag: data.bull_tag||'',
+                      current_herd_id: a.current_herd_id || null,
                       status:'active', lactating:false,
                     })
                     if (a.sex==='cow') await updateAnimal(a.id, { lactating:true })
@@ -702,7 +761,7 @@ function RecordSection({ title, records, onAdd, renderRecord, onRemove }) {
 function SubRecordModal({ type, animal, animals, onClose, onSave }) {
   const [d, setD] = useState({
     date: today(),
-    bred_date: today(), breeding_method:'natural', bull_tag:'', actual_calving_date:'', calf_tag:'', calving_ease:'', preg_result:'',
+    bred_date: today(), breeding_method:'natural', bull_tag:'', actual_calving_date:'', calf_tag:'', calf_sex:'heifer_calf', calf_birth_weight:'', calving_ease:'', preg_result:'',
     weight:'', event_type:'routine',
     score:'5',
     record_type:'vaccination', product:'', dose:'', condition:'', withdrawal_date:'', next_due_date:'',
@@ -713,7 +772,7 @@ function SubRecordModal({ type, animal, animals, onClose, onSave }) {
   const titles = { breeding:'Breeding Record', weight:'Weight', bcs:'Body Condition Score', health:'Health Record' }
 
   function handleSave() {
-    if (type==='breeding') onSave({ bred_date:d.bred_date||null, breeding_method:d.breeding_method, bull_tag:d.bull_tag, preg_result:d.preg_result||null, actual_calving_date:d.actual_calving_date||null, calf_tag:d.calf_tag, calving_ease:d.calving_ease?+d.calving_ease:null })
+    if (type==='breeding') onSave({ bred_date:d.bred_date||null, breeding_method:d.breeding_method, bull_tag:d.bull_tag, preg_result:d.preg_result||null, actual_calving_date:d.actual_calving_date||null, calf_tag:d.calf_tag, calf_sex:d.calf_sex, calf_birth_weight:d.calf_birth_weight, calving_ease:d.calving_ease?+d.calving_ease:null })
     if (type==='weight') { if(!d.weight){alert('Weight required');return} onSave({ date:d.date, weight:+d.weight, event_type:d.event_type }) }
     if (type==='bcs') onSave({ date:d.date, score:+d.score })
     if (type==='health') onSave({ date:d.date, record_type:d.record_type, product:d.product, dose:d.dose, condition:d.condition, withdrawal_date:d.withdrawal_date||null, next_due_date:d.next_due_date||null })
@@ -744,6 +803,16 @@ function SubRecordModal({ type, animal, animals, onClose, onSave }) {
             <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
               <div className="field"><label className="label">Actual Calving</label><input className="input" type="date" value={d.actual_calving_date} onChange={e=>s('actual_calving_date',e.target.value)} /></div>
               <div className="field"><label className="label">Calf Tag</label><input className="input" value={d.calf_tag} onChange={e=>s('calf_tag',e.target.value)} placeholder={suggestNextTag(animals.map(x=>x.tag), curYear)} /></div>
+            </div>
+            <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+              <div className="field"><label className="label">Calf Sex</label>
+                <select className="select" value={d.calf_sex} onChange={e=>s('calf_sex',e.target.value)}>
+                  <option value="heifer_calf">🐮 Heifer Calf</option>
+                  <option value="bull_calf">🐮 Bull Calf</option>
+                  <option value="steer_calf">🐮 Steer Calf</option>
+                </select>
+              </div>
+              <div className="field"><label className="label">Calf Birth Weight (lb)</label><input className="input" type="number" value={d.calf_birth_weight} onChange={e=>s('calf_birth_weight',e.target.value)} placeholder="e.g. 82" /></div>
             </div>
             <div className="field" style={{ marginBottom:'1rem' }}><label className="label">Calving Ease (1=easy, 5=hard)</label><select className="select" value={d.calving_ease} onChange={e=>s('calving_ease',e.target.value)}><option value="">—</option>{[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
           </>
