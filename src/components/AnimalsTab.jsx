@@ -1,471 +1,739 @@
-// ─── Animal Records Library ─────────────────────────────────────────────────────
-// Complete multi-year herd record system
-// Core principle: nothing deleted, only archived. Records build value over years.
+import { useState, useMemo } from 'react'
+import {
+  useAnimals, useBreedingRecords, useWeightRecords, useBcsRecords, useHealthRecords, useHerds, useMachines,
+} from '../hooks/useData'
+import {
+  SEXES, STATUSES, BREEDS, yearToLetter, suggestNextTag,
+  expectedCalvingDate, calvingAlert, ageDisplay, ageInDays,
+  estimateCalfWeight, calcADG, latestWeight, currentWeight,
+  cowBreedingSummary, getOffspring, getDam, getSire,
+  withdrawalStatus, upcomingVaccinations, bcsTrend, bcsColor, BCS_LABELS,
+  calfPerformanceByYear, compositionValid, compositionTotal, compositionDisplay,
+  compositionShort, calcCalfComposition,
+} from '../lib/animals.js'
 
-// ── Year-letter tag scheme ──────────────────────────────────────────────────────
-// 2024=A, 2025=B, 2026=C, 2027=D...
-export function yearToLetter(year) {
-  const base = 2024 // A
-  const offset = year - base
-  if (offset < 0) return 'Z'
-  if (offset < 26) return String.fromCharCode(65 + offset)
-  // After Z, go AA, AB...
-  const first = Math.floor(offset / 26) - 1
-  const second = offset % 26
-  return String.fromCharCode(65 + first) + String.fromCharCode(65 + second)
-}
+const today = () => new Date().toISOString().slice(0,10)
+const curYear = new Date().getFullYear()
 
-export function letterToYear(letter) {
-  const base = 2024
-  if (letter.length === 1) return base + (letter.charCodeAt(0) - 65)
-  const first = letter.charCodeAt(0) - 65 + 1
-  const second = letter.charCodeAt(1) - 65
-  return base + first * 26 + second
-}
+export default function AnimalsTab() {
+  const { data: animals, insert: insertAnimal, update: updateAnimal, remove: removeAnimal, loading } = useAnimals()
+  const { data: breeding, insert: insertBreeding, update: updateBreeding, remove: removeBreeding } = useBreedingRecords()
+  const { data: weights, insert: insertWeight, remove: removeWeight } = useWeightRecords()
+  const { data: bcs, insert: insertBcs, remove: removeBcs } = useBcsRecords()
+  const { data: health, insert: insertHealth, remove: removeHealth } = useHealthRecords()
+  const { data: herds } = useHerds()
+  const { data: machines } = useMachines()
 
-// Suggest next tag for a birth year given existing tags
-export function suggestNextTag(existingTags, birthYear) {
-  const letter = yearToLetter(birthYear)
-  const sameYear = existingTags
-    .filter(t => t.startsWith(letter))
-    .map(t => parseInt(t.slice(letter.length)))
-    .filter(n => !isNaN(n))
-  const maxNum = sameYear.length > 0 ? Math.max(...sameYear) : 100
-  return `${letter}${maxNum + 1}`
-}
+  const [view, setView]       = useState('list')   // list | detail | add
+  const [selId, setSelId]     = useState(null)
+  const [filter, setFilter]   = useState('active')  // active | all | cow | bull | calf
+  const [search, setSearch]   = useState('')
+  const [saving, setSaving]   = useState(false)
+  const [subForm, setSubForm] = useState(null)      // breeding | weight | bcs | health
 
-// ── Animal classes & sexes ──────────────────────────────────────────────────────
-export const SEXES = {
-  cow:     { label: 'Cow',     icon: '🐄', breeding: true,  intakePct: 2.0 },
-  bull:    { label: 'Bull',    icon: '🐂', breeding: true,  intakePct: 1.8 },
-  heifer:  { label: 'Heifer',  icon: '🐄', breeding: true,  intakePct: 2.8 },
-  steer:   { label: 'Steer',   icon: '🐃', breeding: false, intakePct: 2.8 },
-  calf:    { label: 'Calf',    icon: '🐮', breeding: false, intakePct: 0 }, // age-based
-}
+  const allTags = animals.map(a => a.tag)
 
-export const STATUSES = {
-  active:   { label: 'Active',   color: 'var(--grass)' },
-  sold:     { label: 'Sold',     color: 'var(--sky)' },
-  died:     { label: 'Died',     color: 'var(--alert)' },
-  culled:   { label: 'Culled',   color: 'var(--gold)' },
-  archived: { label: 'Archived', color: 'var(--subtext)' },
-}
-
-export const BREEDS = [
-  'South Poll', 'Angus', 'Red Angus', 'Hereford', 'Black Baldy', 'Charolais',
-  'Simmental', 'Gelbvieh', 'Limousin', 'Shorthorn', 'Brangus',
-  'Brahman', 'Wagyu', 'Holstein', 'Red Devon', 'Pineywoods',
-  'Corriente', 'Crossbred', 'Composite', 'Other',
-]
-
-// ── Gestation & calving ─────────────────────────────────────────────────────────
-export const GESTATION_DAYS = 285
-
-export function expectedCalvingDate(bredDate) {
-  const d = new Date(bredDate)
-  d.setDate(d.getDate() + GESTATION_DAYS)
-  return d.toISOString().slice(0, 10)
-}
-
-export function daysUntilCalving(bredDate, today = new Date()) {
-  const due = new Date(expectedCalvingDate(bredDate))
-  return Math.floor((due - new Date(today)) / 86400000)
-}
-
-export function calvingAlert(bredDate, today = new Date()) {
-  const days = daysUntilCalving(bredDate, today)
-  if (days < -5)  return { level: 'overdue', color: 'var(--alert)', msg: `Overdue by ${Math.abs(days)} days`, days }
-  if (days < 0)   return { level: 'due',     color: 'var(--alert)', msg: `Due now (${Math.abs(days)} days past)`, days }
-  if (days <= 14) return { level: 'alert',   color: 'var(--alert)', msg: `Due in ${days} days — watch closely`, days }
-  if (days <= 30) return { level: 'warn',    color: 'var(--gold)',  msg: `Due in ${days} days`, days }
-  return { level: 'ok', color: 'var(--subtext)', msg: `Due in ${days} days`, days }
-}
-
-// ── Age & weight ──────────────────────────────────────────────────────────────
-export function ageInDays(birthDate, asOf = new Date()) {
-  if (!birthDate) return null
-  return Math.floor((new Date(asOf) - new Date(birthDate)) / 86400000)
-}
-
-export function ageDisplay(birthDate, asOf = new Date()) {
-  const days = ageInDays(birthDate, asOf)
-  if (days == null) return '—'
-  if (days < 60)  return `${days} days`
-  if (days < 730) return `${Math.floor(days / 30.4)} months`
-  return `${(days / 365).toFixed(1)} years`
-}
-
-// Calf weight estimate from birth weight + ADG
-export function estimateCalfWeight(birthWeight, ageDays, adg = 2.0) {
-  if (ageDays == null || birthWeight == null) return null
-  return Math.round(birthWeight + (ageDays * adg))
-}
-
-// Age-based calf intake rate (% of body weight in DM)
-export function calfIntakeRate(ageDays) {
-  if (ageDays == null) return 0
-  if (ageDays <= 30) return 0.0    // nursing only
-  if (ageDays <= 60) return 0.015  // starting to graze
-  if (ageDays <= 90) return 0.025  // grazing well
-  return 0.030                     // full grazer
-}
-
-// ── ADG calculation ─────────────────────────────────────────────────────────────
-export function calcADG(weightRecords) {
-  if (!weightRecords || weightRecords.length < 2) return null
-  const sorted = [...weightRecords].sort((a, b) => new Date(a.date) - new Date(b.date))
-  const first = sorted[0], last = sorted[sorted.length - 1]
-  const days = Math.floor((new Date(last.date) - new Date(first.date)) / 86400000)
-  if (days <= 0) return null
-  return +((last.weight - first.weight) / days).toFixed(2)
-}
-
-// ADG between two specific consecutive records
-export function adgBetween(rec1, rec2) {
-  const days = Math.floor((new Date(rec2.date) - new Date(rec1.date)) / 86400000)
-  if (days <= 0) return null
-  return +((rec2.weight - rec1.weight) / days).toFixed(2)
-}
-
-// 205-day adjusted weaning weight (industry standard)
-export function adjustedWeaningWeight(birthWeight, weaningWeight, weaningAgeDays) {
-  if (!birthWeight || !weaningWeight || !weaningAgeDays) return null
-  const adg = (weaningWeight - birthWeight) / weaningAgeDays
-  return Math.round(birthWeight + (adg * 205))
-}
-
-// 365-day adjusted yearling weight
-export function adjustedYearlingWeight(weaningWeight, yearlingWeight, daysBetween) {
-  if (!weaningWeight || !yearlingWeight || !daysBetween) return null
-  const adg = (yearlingWeight - weaningWeight) / daysBetween
-  const daysFromWeanTo365 = 365 - 205
-  return Math.round(weaningWeight + (adg * daysFromWeanTo365))
-}
-
-// Latest weight from records
-export function latestWeight(weightRecords, birthWeight = null) {
-  if (!weightRecords || weightRecords.length === 0) return birthWeight
-  const sorted = [...weightRecords].sort((a, b) => new Date(b.date) - new Date(a.date))
-  return sorted[0].weight
-}
-
-// Current estimated weight (use latest record, or estimate from birth + ADG)
-export function currentWeight(animal, weightRecords, asOf = new Date()) {
-  const latest = latestWeight(weightRecords)
-  if (latest) {
-    // If we have a recent weight + ADG, project forward
-    if (weightRecords.length >= 2) {
-      const adg = calcADG(weightRecords)
-      const sorted = [...weightRecords].sort((a, b) => new Date(b.date) - new Date(a.date))
-      const daysSince = Math.floor((new Date(asOf) - new Date(sorted[0].date)) / 86400000)
-      if (adg && daysSince > 0 && daysSince < 120) {
-        return Math.round(latest + adg * daysSince)
-      }
-    }
-    return latest
+  const emptyAnimal = {
+    tag: '', name: '', breed: 'Angus', sex: 'cow', color: '',
+    birth_date: '', birth_weight: '', sire_tag: '', dam_tag: '',
+    registration_number: '', status: 'active', lactating: false, notes: '', current_herd_id: '',
+    breed_composition: [],
   }
-  // No weight records — estimate from birth weight if calf
-  if (animal.birth_weight && animal.birth_date) {
-    const age = ageInDays(animal.birth_date, asOf)
-    return estimateCalfWeight(animal.birth_weight, age, 2.0)
-  }
-  return null
-}
+  const [form, setForm] = useState(emptyAnimal)
+  const set = (k,v) => setForm(f => ({...f,[k]:v}))
 
-// ── BCS (Body Condition Score 1-9) ──────────────────────────────────────────────
-export const BCS_LABELS = {
-  1: 'Emaciated', 2: 'Very thin', 3: 'Thin', 4: 'Borderline',
-  5: 'Moderate', 6: 'Good', 7: 'Fleshy', 8: 'Fat', 9: 'Obese',
-}
+  // Breed composition handlers
+  const comp = form.breed_composition || []
+  const addCompRow = () => setForm(f => ({...f, breed_composition:[...(f.breed_composition||[]), {breed:'South Poll', pct:0}]}))
+  const updateCompRow = (i,k,v) => setForm(f => ({...f, breed_composition:(f.breed_composition||[]).map((r,idx)=>idx===i?{...r,[k]:k==='pct'?(parseFloat(v)||0):v}:r)}))
+  const removeCompRow = (i) => setForm(f => ({...f, breed_composition:(f.breed_composition||[]).filter((_,idx)=>idx!==i)}))
+  const compTotal = compositionTotal(comp)
 
-export function bcsColor(score) {
-  if (score <= 3) return 'var(--alert)'
-  if (score <= 4) return 'var(--gold)'
-  if (score <= 7) return 'var(--grass)'
-  return 'var(--gold)'
-}
-
-export function bcsTrend(bcsRecords) {
-  if (!bcsRecords || bcsRecords.length < 2) return null
-  const sorted = [...bcsRecords].sort((a, b) => new Date(a.date) - new Date(b.date))
-  const first = sorted[0].score, last = sorted[sorted.length - 1].score
-  if (last > first) return { dir: 'improving', delta: +(last - first).toFixed(1) }
-  if (last < first) return { dir: 'declining', delta: +(last - first).toFixed(1) }
-  return { dir: 'stable', delta: 0 }
-}
-
-// ── Live herd weight & DM (drives grazing math) ──────────────────────────────────
-export function calcLiveHerdMetrics(animals, weightRecordsByAnimal, asOf = new Date()) {
-  let totalLW = 0
-  let totalDM = 0
-  let headCount = 0
-  const breakdown = { cow: 0, bull: 0, heifer: 0, steer: 0, calf: 0 }
-
-  animals.filter(a => a.status === 'active').forEach(animal => {
-    const records = weightRecordsByAnimal[animal.id] || []
-    let weight = currentWeight(animal, records, asOf)
-
-    if (animal.sex === 'calf') {
-      const age = ageInDays(animal.birth_date, asOf)
-      weight = weight || estimateCalfWeight(animal.birth_weight, age, 2.0)
-      const rate = calfIntakeRate(age)
-      if (weight) {
-        totalLW += weight
-        totalDM += weight * rate
-      }
+  // Suggest calf composition from parents
+  function suggestCalfComposition() {
+    const dam = animals.find(a => a.tag === form.dam_tag)
+    const sire = animals.find(a => a.tag === form.sire_tag)
+    const damComp = dam?.breed_composition ? (typeof dam.breed_composition==='string'?JSON.parse(dam.breed_composition):dam.breed_composition) : (dam?.breed?[{breed:dam.breed,pct:100}]:null)
+    const sireComp = sire?.breed_composition ? (typeof sire.breed_composition==='string'?JSON.parse(sire.breed_composition):sire.breed_composition) : (sire?.breed?[{breed:sire.breed,pct:100}]:null)
+    const suggested = calcCalfComposition(damComp, sireComp)
+    if (suggested) {
+      setForm(f => ({...f, breed_composition: suggested, breed: suggested[0].breed}))
     } else {
-      const sexInfo = SEXES[animal.sex] || SEXES.cow
-      // Lactating cow gets higher rate
-      let rate = sexInfo.intakePct / 100
-      if (animal.sex === 'cow' && animal.lactating) rate = 0.031
-      if (weight) {
-        totalLW += weight
-        totalDM += weight * rate
+      alert('Set breed composition on the dam and/or sire first to auto-calculate.')
+    }
+  }
+
+  const selAnimal = animals.find(a => a.id === selId)
+
+  // Records for selected animal
+  const animalBreeding = useMemo(() => breeding.filter(b => b.animal_id === selId), [breeding, selId])
+  const animalWeights  = useMemo(() => weights.filter(w => w.animal_id === selId).sort((a,b)=>new Date(b.date)-new Date(a.date)), [weights, selId])
+  const animalBcs      = useMemo(() => bcs.filter(b => b.animal_id === selId).sort((a,b)=>new Date(b.date)-new Date(a.date)), [bcs, selId])
+  const animalHealth   = useMemo(() => health.filter(h => h.animal_id === selId).sort((a,b)=>new Date(b.date)-new Date(a.date)), [health, selId])
+
+  // Filtered list
+  const filtered = useMemo(() => {
+    let list = animals
+    if (filter === 'active') list = list.filter(a => a.status === 'active')
+    else if (['cow','bull','calf','heifer','steer'].includes(filter)) list = list.filter(a => a.sex === filter && a.status === 'active')
+    if (search) {
+      const s = search.toLowerCase()
+      list = list.filter(a => a.tag?.toLowerCase().includes(s) || a.name?.toLowerCase().includes(s))
+    }
+    return list
+  }, [animals, filter, search])
+
+  // Calving alerts across herd
+  const calvingAlerts = useMemo(() => {
+    return breeding
+      .filter(b => b.bred_date && !b.actual_calving_date)
+      .map(b => {
+        const animal = animals.find(a => a.id === b.animal_id)
+        const alert = calvingAlert(b.bred_date)
+        return { animal, breeding: b, alert }
+      })
+      .filter(x => x.animal && (x.alert.level === 'alert' || x.alert.level === 'warn' || x.alert.level === 'overdue' || x.alert.level === 'due'))
+      .sort((a,b) => a.alert.days - b.alert.days)
+  }, [breeding, animals])
+
+  async function saveAnimal() {
+    if (!form.tag.trim()) { alert('Tag is required'); return }
+    setSaving(true)
+    try {
+      const row = {
+        ...form,
+        birth_weight: form.birth_weight ? +form.birth_weight : null,
+        birth_date: form.birth_date || null,
+        current_herd_id: form.current_herd_id || null,
+        breed_composition: form.breed_composition && form.breed_composition.length ? JSON.stringify(form.breed_composition) : null,
       }
-    }
-
-    if (weight) {
-      headCount++
-      breakdown[animal.sex] = (breakdown[animal.sex] || 0) + 1
-    }
-  })
-
-  return {
-    totalLiveweight: Math.round(totalLW),
-    dailyDmLbs: Math.round(totalDM),
-    headCount,
-    avgIntakePct: totalLW > 0 ? +((totalDM / totalLW) * 100).toFixed(2) : 0,
-    breakdown,
+      if (selId && view === 'add') {
+        await updateAnimal(selId, row)
+      } else {
+        const created = await insertAnimal(row)
+        // Auto-create birth weight record if provided
+        if (form.birth_weight && form.birth_date) {
+          await insertWeight({ animal_id: created.id, date: form.birth_date, weight: +form.birth_weight, event_type: 'birth' })
+        }
+      }
+      setForm(emptyAnimal); setView('list'); setSelId(null)
+    } catch(e) { alert('Error: ' + e.message) }
+    setSaving(false)
   }
-}
 
-// ── Breeding summary per cow (lifetime productivity) ──────────────────────────────
-export function cowBreedingSummary(breedingRecords) {
-  const calved = breedingRecords.filter(b => b.actual_calving_date)
-  if (calved.length === 0) return { totalCalves: 0, avgInterval: null, calvingEaseAvg: null }
-
-  const sorted = calved.sort((a, b) => new Date(a.actual_calving_date) - new Date(b.actual_calving_date))
-  const intervals = []
-  for (let i = 1; i < sorted.length; i++) {
-    const days = Math.floor((new Date(sorted[i].actual_calving_date) - new Date(sorted[i-1].actual_calving_date)) / 86400000)
-    intervals.push(days)
-  }
-  const avgInterval = intervals.length > 0 ? Math.round(intervals.reduce((s, d) => s + d, 0) / intervals.length) : null
-  const easeScores = calved.filter(b => b.calving_ease).map(b => b.calving_ease)
-  const calvingEaseAvg = easeScores.length > 0 ? +(easeScores.reduce((s, e) => s + e, 0) / easeScores.length).toFixed(1) : null
-
-  return {
-    totalCalves: calved.length,
-    avgInterval,          // days between calvings (365 ideal)
-    calvingEaseAvg,       // 1-5 (1 = unassisted)
-    intervalRating: avgInterval ? (avgInterval <= 370 ? 'excellent' : avgInterval <= 400 ? 'good' : 'needs improvement') : null,
-  }
-}
-
-// ── Sire/dam pedigree linkage ─────────────────────────────────────────────────────
-export function getOffspring(animalTag, allAnimals) {
-  return allAnimals.filter(a => a.dam_tag === animalTag || a.sire_tag === animalTag)
-}
-
-export function getDam(animal, allAnimals) {
-  return allAnimals.find(a => a.tag === animal.dam_tag)
-}
-
-export function getSire(animal, allAnimals) {
-  return allAnimals.find(a => a.tag === animal.sire_tag)
-}
-
-// ── Health record helpers ─────────────────────────────────────────────────────────
-export function withdrawalStatus(healthRecords, asOf = new Date()) {
-  const active = healthRecords
-    .filter(h => h.withdrawal_date && new Date(h.withdrawal_date) > new Date(asOf))
-    .sort((a, b) => new Date(b.withdrawal_date) - new Date(a.withdrawal_date))
-  if (active.length === 0) return null
-  const latest = active[0]
-  const daysLeft = Math.ceil((new Date(latest.withdrawal_date) - new Date(asOf)) / 86400000)
-  return {
-    clear: false,
-    daysLeft,
-    product: latest.product,
-    withdrawalDate: latest.withdrawal_date,
-    msg: `Withdrawal active — ${daysLeft} days until clear (${latest.product})`,
-  }
-}
-
-export function upcomingVaccinations(healthRecords, asOf = new Date(), daysAhead = 30) {
-  return healthRecords
-    .filter(h => h.next_due_date)
-    .filter(h => {
-      const days = Math.floor((new Date(h.next_due_date) - new Date(asOf)) / 86400000)
-      return days >= 0 && days <= daysAhead
+  function openEdit(a) {
+    setForm({
+      tag:a.tag, name:a.name||'', breed:a.breed||'Angus', sex:a.sex,
+      color:a.color||'', birth_date:a.birth_date||'', birth_weight:a.birth_weight||'',
+      sire_tag:a.sire_tag||'', dam_tag:a.dam_tag||'', registration_number:a.registration_number||'',
+      status:a.status, lactating:a.lactating||false, notes:a.notes||'', current_herd_id:a.current_herd_id||'',
+      breed_composition: a.breed_composition ? (typeof a.breed_composition==='string'?JSON.parse(a.breed_composition):a.breed_composition) : [],
     })
-    .sort((a, b) => new Date(a.next_due_date) - new Date(b.next_due_date))
-}
-
-// ── Year-over-year calf performance ───────────────────────────────────────────────
-export function calfPerformanceByYear(animals, weightRecordsByAnimal) {
-  const byYear = {}
-  animals.filter(a => a.sex === 'calf' || a.birth_date).forEach(animal => {
-    if (!animal.birth_date) return
-    const year = new Date(animal.birth_date).getFullYear()
-    if (!byYear[year]) byYear[year] = { births: [], weanings: [], adgs: [] }
-    if (animal.birth_weight) byYear[year].births.push(animal.birth_weight)
-    const records = weightRecordsByAnimal[animal.id] || []
-    const weaning = records.find(r => r.event_type === 'weaning')
-    if (weaning) byYear[year].weanings.push(weaning.weight)
-    const adg = calcADG(records)
-    if (adg) byYear[year].adgs.push(adg)
-  })
-
-  return Object.entries(byYear).map(([year, data]) => ({
-    year: +year,
-    avgBirthWeight: data.births.length ? Math.round(data.births.reduce((s, w) => s + w, 0) / data.births.length) : null,
-    avgWeaningWeight: data.weanings.length ? Math.round(data.weanings.reduce((s, w) => s + w, 0) / data.weanings.length) : null,
-    avgADG: data.adgs.length ? +(data.adgs.reduce((s, a) => s + a, 0) / data.adgs.length).toFixed(2) : null,
-    calfCount: data.births.length,
-  })).sort((a, b) => a.year - b.year)
-}
-
-// ── Herd ↔ Animal linkage ─────────────────────────────────────────────────────
-// Get all animals assigned to a herd
-export function animalsInHerd(herdId, allAnimals) {
-  return allAnimals.filter(a => a.current_herd_id === herdId && a.status === 'active')
-}
-
-// Calculate herd metrics from assigned animals (real weights)
-// Returns null if no animals assigned — caller falls back to class counts
-export function herdMetricsFromAnimals(herdId, allAnimals, weightRecordsByAnimal, asOf = new Date()) {
-  const assigned = animalsInHerd(herdId, allAnimals)
-  if (assigned.length === 0) return null   // fall back to class counts
-
-  const metrics = calcLiveHerdMetrics(assigned, weightRecordsByAnimal, asOf)
-  return {
-    ...metrics,
-    source: 'records',          // vs 'estimated'
-    animalCount: assigned.length,
+    setSelId(a.id); setView('add'); window.scrollTo(0,0)
   }
-}
 
-// Decide which metrics to use: real records if available, else class counts
-export function resolveHerdMetrics(herd, allAnimals, weightRecordsByAnimal, asOf = new Date()) {
-  const fromRecords = herdMetricsFromAnimals(herd.id, allAnimals, weightRecordsByAnimal, asOf)
-  if (fromRecords) {
-    return {
-      source: 'records',
-      totalLiveweight: fromRecords.totalLiveweight,
-      dailyDmLbs: fromRecords.dailyDmLbs,
-      headCount: fromRecords.headCount,
-      avgIntakePct: fromRecords.avgIntakePct,
-      breakdown: fromRecords.breakdown,
-    }
+  function startAdd(presetSex) {
+    const sex = presetSex || 'cow'
+    const birthYear = sex === 'calf' ? curYear : curYear - 2
+    setForm({ ...emptyAnimal, sex, tag: suggestNextTag(allTags, birthYear) })
+    setSelId(null); setView('add'); window.scrollTo(0,0)
   }
-  // Fall back to stored class-count estimates
-  return {
-    source: 'estimated',
-    totalLiveweight: herd.total_lw || 0,
-    dailyDmLbs: herd.daily_dm || 0,
-    headCount: herd.total_head || 0,
-    avgIntakePct: herd.avg_intake_pct || 0,
-    breakdown: null,
+
+  // ════ LIST VIEW ════
+  if (loading) return <div className="text-muted text-sm" style={{padding:'2rem'}}>Loading…</div>
+
+  if (view === 'list') {
+    const cowCount = animals.filter(a=>a.sex==='cow'&&a.status==='active').length
+    const bullCount= animals.filter(a=>a.sex==='bull'&&a.status==='active').length
+    const calfCount= animals.filter(a=>a.sex==='calf'&&a.status==='active').length
+    const totalActive = animals.filter(a=>a.status==='active').length
+
+    return (
+      <div>
+        <div className="section-heading">Animal Records</div>
+        <div className="section-desc">Individual records from birth to exit. Breeding, weights, health, and pedigree — building value every year.</div>
+
+        {/* Calving alerts */}
+        {calvingAlerts.length > 0 && (
+          <div className="card" style={{ border:'1px solid var(--gold)', background:'rgba(240,192,64,0.06)' }}>
+            <div className="card-sub mb-2" style={{ color:'var(--gold)' }}>🐮 Calving Watch</div>
+            {calvingAlerts.slice(0,5).map((x,i) => (
+              <div key={i} className="list-item" style={{ cursor:'pointer' }} onClick={()=>{setSelId(x.animal.id);setView('detail')}}>
+                <div>
+                  <span style={{ fontFamily:'DM Mono, monospace', color:'var(--cream)', fontWeight:600 }}>{x.animal.tag}</span>
+                  {x.animal.name && <span style={{ color:'var(--subtext)', marginLeft:6 }}>{x.animal.name}</span>}
+                  <div style={{ fontSize:'0.72rem', color:x.alert.color, marginTop:2 }}>{x.alert.msg} · due {x.breeding.expected_calving_date || expectedCalvingDate(x.breeding.bred_date)}</div>
+                </div>
+                <span style={{ color:x.alert.color, fontSize:'1.1rem' }}>{x.alert.level==='overdue'||x.alert.level==='due'?'🔴':x.alert.level==='alert'?'🟠':'🟡'}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Summary stats */}
+        <div className="grid-4 mb-2">
+          {[['Cows',cowCount],['Bulls',bullCount],['Calves',calfCount],['Total Active',totalActive]].map(([l,v])=>(
+            <div key={l} className="stat-box"><div className="stat-val">{v}</div><div className="stat-lbl">{l}</div></div>
+          ))}
+        </div>
+
+        {/* Add buttons */}
+        <div className="flex gap-1 mb-2" style={{ flexWrap:'wrap' }}>
+          <button className="btn btn-primary btn-sm" onClick={()=>startAdd('cow')}>+ Cow</button>
+          <button className="btn btn-primary btn-sm" onClick={()=>startAdd('bull')}>+ Bull</button>
+          <button className="btn btn-primary btn-sm" onClick={()=>startAdd('heifer')}>+ Heifer</button>
+          <button className="btn btn-primary btn-sm" onClick={()=>startAdd('calf')}>+ Calf</button>
+          <button className="btn btn-secondary btn-sm" onClick={()=>startAdd('steer')}>+ Steer</button>
+        </div>
+
+        {/* Filters */}
+        <div className="card" style={{ padding:'0.6rem 0.85rem', marginBottom:'0.75rem' }}>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' }}>
+            {['active','cow','bull','heifer','calf','all'].map(f=>(
+              <button key={f} onClick={()=>setFilter(f)} style={{
+                background: filter===f?'var(--moss)':'var(--bark)',
+                border:`1px solid ${filter===f?'var(--grass)':'var(--bark2)'}`,
+                borderRadius:6, padding:'4px 11px', cursor:'pointer',
+                color: filter===f?'var(--white)':'var(--subtext)',
+                fontFamily:'DM Mono, monospace', fontSize:'0.68rem', textTransform:'capitalize',
+              }}>{f}</button>
+            ))}
+            <input className="input" placeholder="Search tag/name…" value={search} onChange={e=>setSearch(e.target.value)}
+              style={{ maxWidth:160, marginLeft:'auto', fontSize:'0.78rem', padding:'5px 10px' }} />
+          </div>
+        </div>
+
+        {/* Animal list */}
+        {filtered.length === 0 && (
+          <div className="card" style={{ textAlign:'center', padding:'2.5rem' }}>
+            <div style={{ fontSize:'2.5rem', marginBottom:'0.5rem' }}>🐄</div>
+            <div className="text-muted">No animals {filter!=='all'?`(${filter})`:''} yet. Add your first one above.</div>
+          </div>
+        )}
+
+        {filtered.map(a => {
+          const wr = weights.filter(w=>w.animal_id===a.id)
+          const wt = currentWeight(a, wr)
+          const sexInfo = SEXES[a.sex] || SEXES.cow
+          const age = ageDisplay(a.birth_date)
+          const animalBreed = breeding.filter(b=>b.animal_id===a.id && b.bred_date && !b.actual_calving_date)
+          const pendingCalving = animalBreed.length > 0 ? calvingAlert(animalBreed[0].bred_date) : null
+          return (
+            <div key={a.id} className="list-item" onClick={()=>{setSelId(a.id);setView('detail')}}>
+              <div style={{ flex:1 }}>
+                <div className="flex gap-1" style={{ alignItems:'center', marginBottom:'0.2rem', flexWrap:'wrap' }}>
+                  <span style={{ fontSize:'1.05rem' }}>{sexInfo.icon}</span>
+                  <strong style={{ color:'var(--cream)', fontFamily:'DM Mono, monospace' }}>{a.tag}</strong>
+                  {a.name && <span style={{ color:'var(--subtext)' }}>{a.name}</span>}
+                  <span className="badge">{sexInfo.label}</span>
+                  {a.status!=='active' && <span className="badge" style={{ borderColor:STATUSES[a.status]?.color, color:STATUSES[a.status]?.color }}>{a.status}</span>}
+                  {a.lactating && <span className="badge" style={{ borderColor:'var(--sky)', color:'var(--sky)' }}>lactating</span>}
+                  {pendingCalving && (pendingCalving.level==='alert'||pendingCalving.level==='overdue'||pendingCalving.level==='due') &&
+                    <span className="badge" style={{ borderColor:'var(--gold)', color:'var(--gold)' }}>🐮 {pendingCalving.days<=0?'due':pendingCalving.days+'d'}</span>}
+                </div>
+                <div style={{ fontSize:'0.7rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace' }}>
+                  {(() => {
+                    const ac = a.breed_composition ? (typeof a.breed_composition==='string'?JSON.parse(a.breed_composition):a.breed_composition) : null
+                    return ac && ac.length ? compositionShort(ac, a.breed) : a.breed
+                  })()} {age!=='—'&&`· ${age}`} {wt&&`· ${wt} lb`} {a.dam_tag&&`· dam ${a.dam_tag}`}
+                </div>
+              </div>
+              <span style={{ color:'var(--grass)', fontSize:'0.72rem' }}>→</span>
+            </div>
+          )
+        })}
+      </div>
+    )
   }
-}
 
+  // ════ ADD/EDIT VIEW ════
+  if (view === 'add') {
+    const isCalf = form.sex === 'calf'
+    const suggestedTag = suggestNextTag(allTags, isCalf ? curYear : curYear-2)
+    return (
+      <div>
+        <div className="flex gap-1" style={{ alignItems:'center', marginBottom:'1rem' }}>
+          <button className="btn btn-secondary btn-sm" onClick={()=>{setView(selId?'detail':'list');setForm(emptyAnimal)}}>← Back</button>
+          <div className="section-heading" style={{ fontSize:'1.3rem', margin:0 }}>{selId?'Edit Animal':'New Animal'}</div>
+        </div>
 
-// ── Breed composition (fractions / composites) ────────────────────────────────
-// Composition is an array: [{ breed:'South Poll', pct:75 }, { breed:'Angus', pct:25 }]
+        <div className="card">
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Tag / ID *</label>
+              <input className="input" value={form.tag} onChange={e=>set('tag',e.target.value)} placeholder={suggestedTag} />
+              {!selId && <div style={{ fontSize:'0.62rem', color:'var(--subtext)', marginTop:3 }}>Suggested: {suggestedTag} ({yearToLetter(isCalf?curYear:curYear-2)}-series)</div>}
+            </div>
+            <div className="field">
+              <label className="label">Name (optional)</label>
+              <input className="input" value={form.name} onChange={e=>set('name',e.target.value)} />
+            </div>
+          </div>
 
-// Common fraction symbols
-const FRACTIONS = [
-  [100, ''], [87.5, '⅞'], [75, '¾'], [62.5, '⅝'], [50, '½'],
-  [37.5, '⅜'], [33.33, '⅓'], [25, '¼'], [12.5, '⅛'], [66.67, '⅔'],
-]
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Sex</label>
+              <select className="select" value={form.sex} onChange={e=>set('sex',e.target.value)}>
+                {Object.entries(SEXES).map(([k,v])=><option key={k} value={k}>{v.icon} {v.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label className="label">Primary Breed</label>
+              <select className="select" value={form.breed} onChange={e=>set('breed',e.target.value)}>
+                {BREEDS.map(b=><option key={b} value={b}>{b}</option>)}
+              </select>
+            </div>
+          </div>
 
-export function fractionSymbol(pct) {
-  for (const [val, sym] of FRACTIONS) {
-    if (Math.abs(pct - val) < 0.6) return sym
+          {/* Breed composition builder */}
+          <div style={{ background:'var(--bark)', borderRadius:9, padding:'0.85rem', marginBottom:'0.75rem' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'0.5rem' }}>
+              <div className="card-sub" style={{ margin:0 }}>Breed Composition {comp.length>0 && <span style={{ color: Math.abs(compTotal-100)<0.5?'var(--grass)':'var(--alert)', fontFamily:'DM Mono, monospace', fontSize:'0.7rem' }}>({compTotal}%)</span>}</div>
+              <div className="flex gap-1">
+                {(form.dam_tag || form.sire_tag) && (
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={suggestCalfComposition}>↯ From parents</button>
+                )}
+                <button type="button" className="btn btn-primary btn-sm" onClick={addCompRow}>+ Breed</button>
+              </div>
+            </div>
+
+            {comp.length === 0 && (
+              <div style={{ fontSize:'0.72rem', color:'var(--subtext)', padding:'0.3rem 0' }}>
+                Optional. Add breeds with percentages for crossbred/composite tracking (e.g. ¾ South Poll, ¼ Angus). Must total 100%. Leave empty to just use primary breed.
+              </div>
+            )}
+
+            {comp.map((row,i)=>(
+              <div key={i} style={{ display:'flex', gap:6, alignItems:'center', marginBottom:'0.4rem' }}>
+                <select className="select" value={row.breed} onChange={e=>updateCompRow(i,'breed',e.target.value)} style={{ flex:1 }}>
+                  {BREEDS.map(b=><option key={b} value={b}>{b}</option>)}
+                </select>
+                <input className="input" type="number" min="0" max="100" step="0.5" value={row.pct}
+                  onChange={e=>updateCompRow(i,'pct',e.target.value)} style={{ maxWidth:75 }} />
+                <span style={{ fontSize:'0.72rem', color:'var(--subtext)' }}>%</span>
+                <button type="button" className="btn btn-danger btn-sm" onClick={()=>removeCompRow(i)}>✕</button>
+              </div>
+            ))}
+
+            {comp.length>0 && (
+              <div style={{ marginTop:'0.5rem', fontSize:'0.75rem' }}>
+                {Math.abs(compTotal-100)<0.5
+                  ? <span style={{ color:'var(--grass)' }}>✓ {compositionDisplay(comp)}</span>
+                  : <span style={{ color:'var(--alert)' }}>⚠ Must total 100% (currently {compTotal}%)</span>}
+              </div>
+            )}
+          </div>
+
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Birth Date</label>
+              <input className="input" type="date" value={form.birth_date} onChange={e=>set('birth_date',e.target.value)} />
+            </div>
+            <div className="field">
+              <label className="label">Birth Weight (lb)</label>
+              <input className="input" type="number" value={form.birth_weight} onChange={e=>set('birth_weight',e.target.value)} placeholder="e.g. 82" />
+            </div>
+          </div>
+
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Dam Tag (mother)</label>
+              <input className="input" value={form.dam_tag} onChange={e=>set('dam_tag',e.target.value)} placeholder="e.g. A201" list="dam-tags" />
+              <datalist id="dam-tags">
+                {animals.filter(a=>a.sex==='cow').map(a=><option key={a.id} value={a.tag} />)}
+              </datalist>
+            </div>
+            <div className="field">
+              <label className="label">Sire Tag (father)</label>
+              <input className="input" value={form.sire_tag} onChange={e=>set('sire_tag',e.target.value)} placeholder="e.g. B01" list="sire-tags" />
+              <datalist id="sire-tags">
+                {animals.filter(a=>a.sex==='bull').map(a=><option key={a.id} value={a.tag} />)}
+              </datalist>
+            </div>
+          </div>
+
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Color / Markings</label>
+              <input className="input" value={form.color} onChange={e=>set('color',e.target.value)} placeholder="e.g. Black" />
+            </div>
+            <div className="field">
+              <label className="label">Registration #</label>
+              <input className="input" value={form.registration_number} onChange={e=>set('registration_number',e.target.value)} />
+            </div>
+          </div>
+
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            <div className="field">
+              <label className="label">Status</label>
+              <select className="select" value={form.status} onChange={e=>set('status',e.target.value)}>
+                {Object.entries(STATUSES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label className="label">Assign to Herd</label>
+              <select className="select" value={form.current_herd_id} onChange={e=>set('current_herd_id',e.target.value)}>
+                <option value="">— No herd —</option>
+                {herds.map(h=><option key={h.id} value={h.id}>{h.name}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+            {(form.sex==='cow'||form.sex==='heifer') && (
+              <div className="field">
+                <label className="label">Lactating?</label>
+                <select className="select" value={form.lactating?'yes':'no'} onChange={e=>set('lactating',e.target.value==='yes')}>
+                  <option value="no">No</option>
+                  <option value="yes">Yes — nursing calf</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="field" style={{ marginBottom:'1rem' }}>
+            <label className="label">Notes</label>
+            <textarea className="textarea" rows={2} value={form.notes} onChange={e=>set('notes',e.target.value)} />
+          </div>
+
+          <div className="flex gap-1">
+            <button className="btn btn-primary" onClick={saveAnimal} disabled={saving}>
+              {saving?<><span className="spinner"/> Saving…</>:selId?'✓ Update':'✓ Save Animal'}
+            </button>
+            <button className="btn btn-secondary" onClick={()=>{setView(selId?'detail':'list');setForm(emptyAnimal)}}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    )
   }
+
+  // ════ DETAIL VIEW ════
+  if (view === 'detail' && selAnimal) {
+    const a = selAnimal
+    const sexInfo = SEXES[a.sex] || SEXES.cow
+    const wt = currentWeight(a, animalWeights)
+    const adg = calcADG(animalWeights)
+    const dam = getDam(a, animals)
+    const sire = getSire(a, animals)
+    const offspring = getOffspring(a.tag, animals)
+    const breedSummary = cowBreedingSummary(animalBreeding)
+    const wd = withdrawalStatus(animalHealth)
+    const upcomingVax = upcomingVaccinations(animalHealth)
+    const bcsT = bcsTrend(animalBcs)
+    const latestBcs = animalBcs[0]
+
+    return (
+      <div>
+        <div className="flex gap-1" style={{ alignItems:'center', marginBottom:'1rem', flexWrap:'wrap' }}>
+          <button className="btn btn-secondary btn-sm" onClick={()=>{setView('list');setSelId(null)}}>← Back</button>
+          <span style={{ fontSize:'1.4rem' }}>{sexInfo.icon}</span>
+          <div className="section-heading" style={{ fontSize:'1.3rem', margin:0, fontFamily:'DM Mono, monospace' }}>{a.tag}</div>
+          {a.name && <span style={{ color:'var(--subtext)', fontFamily:'Satisfy, cursive', fontSize:'1.2rem' }}>{a.name}</span>}
+          <button className="btn btn-secondary btn-sm" style={{ marginLeft:'auto' }} onClick={()=>openEdit(a)}>✎ Edit</button>
+        </div>
+
+        {/* Withdrawal warning */}
+        {wd && !wd.clear && (
+          <div style={{ background:'rgba(224,64,48,0.15)', border:'1px solid var(--alert)', borderRadius:8, padding:'0.7rem 1rem', marginBottom:'0.75rem', color:'var(--alert)', fontSize:'0.82rem' }}>
+            ⚠ {wd.msg}
+          </div>
+        )}
+
+        {/* Vitals */}
+        <div className="card">
+          <div className="grid-4">
+            {[
+              ['Sex', sexInfo.label],
+              ['Breed', (() => {
+                const ac = a.breed_composition ? (typeof a.breed_composition==='string'?JSON.parse(a.breed_composition):a.breed_composition) : null
+                return ac && ac.length ? compositionShort(ac, a.breed) : (a.breed||'—')
+              })()],
+              ['Age', ageDisplay(a.birth_date)],
+              ['Born', a.birth_date||'—'],
+              ['Current Wt', wt?`${wt} lb`:'—'],
+              ['ADG', adg?`${adg} lb/d`:'—'],
+              ['BCS', latestBcs?`${latestBcs.score}`:'—'],
+              ['Status', STATUSES[a.status]?.label],
+            ].map(([l,v])=>(
+              <div key={l} className="stat-box" style={{ padding:'0.6rem' }}>
+                <div className="stat-val" style={{ fontSize:'0.88rem' }}>{v}</div>
+                <div className="stat-lbl" style={{ fontSize:'0.52rem' }}>{l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Pedigree */}
+        {(dam||sire||offspring.length>0) && (
+          <div className="card">
+            <div className="card-sub mb-2">Pedigree</div>
+            <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom: offspring.length?'0.75rem':0 }}>
+              {dam && <button className="badge" style={{ cursor:'pointer', borderColor:'var(--sky)', color:'var(--sky)' }} onClick={()=>{setSelId(dam.id)}}>Dam: {dam.tag}{dam.name?` (${dam.name})`:''}</button>}
+              {sire && <button className="badge" style={{ cursor:'pointer', borderColor:'var(--gold)', color:'var(--gold)' }} onClick={()=>{setSelId(sire.id)}}>Sire: {sire.tag}{sire.name?` (${sire.name})`:''}</button>}
+              {!dam && a.dam_tag && <span className="badge">Dam: {a.dam_tag}</span>}
+              {!sire && a.sire_tag && <span className="badge">Sire: {a.sire_tag}</span>}
+            </div>
+            {offspring.length > 0 && (
+              <div>
+                <div style={{ fontSize:'0.7rem', color:'var(--subtext)', marginBottom:'0.4rem', fontFamily:'DM Mono, monospace' }}>OFFSPRING ({offspring.length})</div>
+                <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+                  {offspring.map(o=>(
+                    <button key={o.id} className="badge" style={{ cursor:'pointer' }} onClick={()=>setSelId(o.id)}>
+                      {SEXES[o.sex]?.icon} {o.tag} {o.birth_date&&`(${new Date(o.birth_date).getFullYear()})`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Breeding summary for cows */}
+        {(a.sex==='cow'||a.sex==='heifer') && breedSummary.totalCalves > 0 && (
+          <div className="card">
+            <div className="card-sub mb-2">Breeding Record</div>
+            <div className="grid-4">
+              {[
+                ['Total Calves', breedSummary.totalCalves],
+                ['Avg Interval', breedSummary.avgInterval?`${breedSummary.avgInterval}d`:'—'],
+                ['Rating', breedSummary.intervalRating||'—'],
+                ['Calving Ease', breedSummary.calvingEaseAvg||'—'],
+              ].map(([l,v])=>(
+                <div key={l} className="stat-box" style={{ padding:'0.6rem' }}>
+                  <div className="stat-val" style={{ fontSize:'0.82rem' }}>{v}</div>
+                  <div className="stat-lbl" style={{ fontSize:'0.52rem' }}>{l}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Records sections with add buttons */}
+        <RecordSection
+          title="Breeding"
+          records={animalBreeding}
+          onAdd={()=>setSubForm('breeding')}
+          renderRecord={b=>(
+            <div>
+              <div style={{ fontSize:'0.75rem', color:'var(--cream)' }}>
+                Bred {b.bred_date} {b.bull_tag&&`to ${b.bull_tag}`} {b.breeding_method&&`(${b.breeding_method})`}
+              </div>
+              <div style={{ fontSize:'0.68rem', color:'var(--subtext)' }}>
+                {b.actual_calving_date ? `Calved ${b.actual_calving_date}${b.calf_tag?` → ${b.calf_tag}`:''}${b.calving_ease?` · ease ${b.calving_ease}`:''}` : `Due ${b.expected_calving_date||expectedCalvingDate(b.bred_date)}`}
+              </div>
+            </div>
+          )}
+          onRemove={removeBreeding}
+        />
+
+        <RecordSection
+          title="Weights"
+          records={animalWeights}
+          onAdd={()=>setSubForm('weight')}
+          renderRecord={(w,i)=>{
+            const next = animalWeights[i-1]
+            const adgVal = next ? calcADG([w,next]) : null
+            return (
+              <div>
+                <div style={{ fontSize:'0.75rem', color:'var(--cream)' }}>{w.date}: <strong>{w.weight} lb</strong> <span className="badge" style={{ fontSize:'0.55rem' }}>{w.event_type}</span></div>
+                {adgVal && <div style={{ fontSize:'0.68rem', color:'var(--grass)' }}>ADG to next: {adgVal} lb/day</div>}
+              </div>
+            )
+          }}
+          onRemove={removeWeight}
+        />
+
+        <RecordSection
+          title="Body Condition (BCS)"
+          records={animalBcs}
+          onAdd={()=>setSubForm('bcs')}
+          renderRecord={b=>(
+            <div style={{ fontSize:'0.75rem', color:'var(--cream)' }}>
+              {b.date}: <strong style={{ color:bcsColor(b.score) }}>{b.score}</strong> — {BCS_LABELS[Math.round(b.score)]}
+            </div>
+          )}
+          onRemove={removeBcs}
+        />
+
+        <RecordSection
+          title="Health"
+          records={animalHealth}
+          onAdd={()=>setSubForm('health')}
+          renderRecord={h=>(
+            <div>
+              <div style={{ fontSize:'0.75rem', color:'var(--cream)' }}>{h.date}: {h.product||h.condition} <span className="badge" style={{ fontSize:'0.55rem' }}>{h.record_type}</span></div>
+              {h.withdrawal_date && <div style={{ fontSize:'0.68rem', color:'var(--gold)' }}>Withdrawal until {h.withdrawal_date}</div>}
+              {h.next_due_date && <div style={{ fontSize:'0.68rem', color:'var(--subtext)' }}>Next due {h.next_due_date}</div>}
+            </div>
+          )}
+          onRemove={removeHealth}
+        />
+
+        {a.notes && (
+          <div className="card">
+            <div className="card-sub mb-1">Notes</div>
+            <div style={{ fontSize:'0.82rem', color:'var(--cream)' }}>{a.notes}</div>
+          </div>
+        )}
+
+        <button className="btn btn-danger btn-sm" onClick={()=>{if(confirm(`Delete ${a.tag}? This removes all records.`)){removeAnimal(a.id);setView('list');setSelId(null)}}}>
+          Delete Animal
+        </button>
+
+        {/* Sub-record modals */}
+        {subForm && (
+          <SubRecordModal
+            type={subForm}
+            animal={a}
+            animals={animals}
+            onClose={()=>setSubForm(null)}
+            onSave={async (data)=>{
+              try {
+                if (subForm==='breeding') {
+                  const rec = { ...data, animal_id:a.id, expected_calving_date: data.bred_date?expectedCalvingDate(data.bred_date):null, season_year: curYear }
+                  const created = await insertBreeding(rec)
+                  // Auto-create calf if calving recorded
+                  if (data.actual_calving_date && data.calf_tag) {
+                    await insertAnimal({
+                      tag: data.calf_tag, sex:'calf', breed:a.breed,
+                      birth_date: data.actual_calving_date,
+                      dam_tag: a.tag, sire_tag: data.bull_tag||'',
+                      status:'active', lactating:false,
+                    })
+                    if (a.sex==='cow') await updateAnimal(a.id, { lactating:true })
+                  }
+                }
+                if (subForm==='weight') await insertWeight({ ...data, animal_id:a.id })
+                if (subForm==='bcs')    await insertBcs({ ...data, animal_id:a.id })
+                if (subForm==='health') await insertHealth({ ...data, animal_id:a.id })
+                setSubForm(null)
+              } catch(e) { alert('Error: '+e.message) }
+            }}
+          />
+        )}
+      </div>
+    )
+  }
+
   return null
 }
 
-// Validate a composition totals 100%
-export function compositionValid(composition) {
-  if (!composition || composition.length === 0) return false
-  const total = composition.reduce((s, c) => s + (parseFloat(c.pct) || 0), 0)
-  return Math.abs(total - 100) < 0.5
+// ── Record section component ──────────────────────────────────────────────────
+function RecordSection({ title, records, onAdd, renderRecord, onRemove }) {
+  return (
+    <div className="card">
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: records.length?'0.5rem':0 }}>
+        <div className="card-sub">{title} ({records.length})</div>
+        <button className="btn btn-primary btn-sm" onClick={onAdd}>+ Add</button>
+      </div>
+      {records.map((r,i)=>(
+        <div key={r.id} className="list-item" style={{ padding:'0.5rem 0' }}>
+          {renderRecord(r,i)}
+          <button className="btn btn-danger btn-sm" onClick={()=>{if(confirm('Delete this record?'))onRemove(r.id)}}>✕</button>
+        </div>
+      ))}
+    </div>
+  )
 }
 
-export function compositionTotal(composition) {
-  if (!composition) return 0
-  return composition.reduce((s, c) => s + (parseFloat(c.pct) || 0), 0)
-}
-
-// Display composition as readable string
-export function compositionDisplay(composition, primaryBreed = null) {
-  if (!composition || composition.length === 0) return primaryBreed || '—'
-  // Sort by pct descending
-  const sorted = [...composition].sort((a, b) => b.pct - a.pct)
-  // If single breed at 100%, just the name
-  if (sorted.length === 1 && Math.abs(sorted[0].pct - 100) < 0.5) return sorted[0].breed
-  // Build "¾ South Poll, ¼ Angus" or "75% South Poll, 25% Angus"
-  return sorted.map(c => {
-    const frac = fractionSymbol(c.pct)
-    return frac ? `${frac} ${c.breed}` : `${Math.round(c.pct)}% ${c.breed}`
-  }).join(', ')
-}
-
-// Short display — just the dominant breed + fraction
-export function compositionShort(composition, primaryBreed = null) {
-  if (!composition || composition.length === 0) return primaryBreed || '—'
-  const sorted = [...composition].sort((a, b) => b.pct - a.pct)
-  const top = sorted[0]
-  if (Math.abs(top.pct - 100) < 0.5) return top.breed
-  const frac = fractionSymbol(top.pct)
-  return frac ? `${frac} ${top.breed}` : `${Math.round(top.pct)}% ${top.breed}`
-}
-
-// Calculate calf composition from dam + sire blends (50/50)
-export function calcCalfComposition(damComposition, sireComposition) {
-  const dam = damComposition && damComposition.length ? damComposition : null
-  const sire = sireComposition && sireComposition.length ? sireComposition : null
-  if (!dam && !sire) return null
-
-  const blend = {}
-  if (dam) dam.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct * 0.5 })
-  else if (sire) {
-    // Unknown dam — can only estimate from sire half
-    sire.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct * 0.5 })
-    blend['Unknown'] = 50
-  }
-  if (sire) sire.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct * 0.5 })
-  else if (dam) {
-    blend['Unknown'] = (blend['Unknown'] || 0) + 50
-  }
-
-  return Object.entries(blend)
-    .map(([breed, pct]) => ({ breed, pct: +pct.toFixed(2) }))
-    .filter(c => c.pct > 0)
-    .sort((a, b) => b.pct - a.pct)
-}
-
-// Herd average composition (for tracking progress toward a target blend)
-export function herdAvgComposition(animals) {
-  const active = animals.filter(a => a.status === 'active')
-  if (active.length === 0) return []
-  const blend = {}
-  let counted = 0
-  active.forEach(a => {
-    let comp = a.breed_composition
-    if (typeof comp === 'string') { try { comp = JSON.parse(comp) } catch { comp = null } }
-    if (comp && comp.length) {
-      comp.forEach(c => { blend[c.breed] = (blend[c.breed] || 0) + c.pct })
-      counted++
-    } else if (a.breed) {
-      blend[a.breed] = (blend[a.breed] || 0) + 100
-      counted++
-    }
+// ── Sub-record modal ────────────────────────────────────────────────────────────
+function SubRecordModal({ type, animal, animals, onClose, onSave }) {
+  const [d, setD] = useState({
+    date: today(),
+    bred_date: today(), breeding_method:'natural', bull_tag:'', actual_calving_date:'', calf_tag:'', calving_ease:'', preg_result:'',
+    weight:'', event_type:'routine',
+    score:'5',
+    record_type:'vaccination', product:'', dose:'', condition:'', withdrawal_date:'', next_due_date:'',
   })
-  if (counted === 0) return []
-  return Object.entries(blend)
-    .map(([breed, total]) => ({ breed, pct: +(total / counted).toFixed(1) }))
-    .sort((a, b) => b.pct - a.pct)
+  const s = (k,v)=>setD(p=>({...p,[k]:v}))
+  const bulls = animals.filter(a=>a.sex==='bull')
+
+  const titles = { breeding:'Breeding Record', weight:'Weight', bcs:'Body Condition Score', health:'Health Record' }
+
+  function handleSave() {
+    if (type==='breeding') onSave({ bred_date:d.bred_date||null, breeding_method:d.breeding_method, bull_tag:d.bull_tag, preg_result:d.preg_result||null, actual_calving_date:d.actual_calving_date||null, calf_tag:d.calf_tag, calving_ease:d.calving_ease?+d.calving_ease:null })
+    if (type==='weight') { if(!d.weight){alert('Weight required');return} onSave({ date:d.date, weight:+d.weight, event_type:d.event_type }) }
+    if (type==='bcs') onSave({ date:d.date, score:+d.score })
+    if (type==='health') onSave({ date:d.date, record_type:d.record_type, product:d.product, dose:d.dose, condition:d.condition, withdrawal_date:d.withdrawal_date||null, next_due_date:d.next_due_date||null })
+  }
+
+  return (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000, padding:'1rem' }} onClick={onClose}>
+      <div className="card" style={{ maxWidth:480, width:'100%', maxHeight:'85vh', overflowY:'auto', margin:0 }} onClick={e=>e.stopPropagation()}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'1rem' }}>
+          <div className="card-title">{titles[type]} — {animal.tag}</div>
+          <button className="btn btn-secondary btn-sm" onClick={onClose}>✕</button>
+        </div>
+
+        {type==='breeding' && (
+          <>
+            <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+              <div className="field"><label className="label">Bred Date</label><input className="input" type="date" value={d.bred_date} onChange={e=>s('bred_date',e.target.value)} /></div>
+              <div className="field"><label className="label">Method</label><select className="select" value={d.breeding_method} onChange={e=>s('breeding_method',e.target.value)}><option value="natural">Natural</option><option value="AI">AI</option></select></div>
+            </div>
+            <div className="field" style={{ marginBottom:'0.75rem' }}>
+              <label className="label">Bull Used</label>
+              <input className="input" value={d.bull_tag} onChange={e=>s('bull_tag',e.target.value)} list="modal-bulls" placeholder="Bull tag" />
+              <datalist id="modal-bulls">{bulls.map(b=><option key={b.id} value={b.tag} />)}</datalist>
+            </div>
+            {d.bred_date && <div style={{ fontSize:'0.72rem', color:'var(--grass)', marginBottom:'0.75rem' }}>Expected calving: {expectedCalvingDate(d.bred_date)}</div>}
+            <hr className="divider" />
+            <div style={{ fontSize:'0.7rem', color:'var(--subtext)', marginBottom:'0.5rem' }}>If already calved, fill below (auto-creates calf record):</div>
+            <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+              <div className="field"><label className="label">Actual Calving</label><input className="input" type="date" value={d.actual_calving_date} onChange={e=>s('actual_calving_date',e.target.value)} /></div>
+              <div className="field"><label className="label">Calf Tag</label><input className="input" value={d.calf_tag} onChange={e=>s('calf_tag',e.target.value)} placeholder={suggestNextTag(animals.map(x=>x.tag), curYear)} /></div>
+            </div>
+            <div className="field" style={{ marginBottom:'1rem' }}><label className="label">Calving Ease (1=easy, 5=hard)</label><select className="select" value={d.calving_ease} onChange={e=>s('calving_ease',e.target.value)}><option value="">—</option>{[1,2,3,4,5].map(n=><option key={n} value={n}>{n}</option>)}</select></div>
+          </>
+        )}
+
+        {type==='weight' && (
+          <>
+            <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+              <div className="field"><label className="label">Date</label><input className="input" type="date" value={d.date} onChange={e=>s('date',e.target.value)} /></div>
+              <div className="field"><label className="label">Weight (lb)</label><input className="input" type="number" value={d.weight} onChange={e=>s('weight',e.target.value)} /></div>
+            </div>
+            <div className="field" style={{ marginBottom:'1rem' }}>
+              <label className="label">Event Type</label>
+              <select className="select" value={d.event_type} onChange={e=>s('event_type',e.target.value)}>
+                {['routine','birth','weaning','yearling','breeding','sale','preg-check'].map(t=><option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </>
+        )}
+
+        {type==='bcs' && (
+          <>
+            <div className="field" style={{ marginBottom:'0.75rem' }}><label className="label">Date</label><input className="input" type="date" value={d.date} onChange={e=>s('date',e.target.value)} /></div>
+            <div className="field" style={{ marginBottom:'1rem' }}>
+              <label className="label">Score (1-9): {d.score} — {BCS_LABELS[Math.round(+d.score)]}</label>
+              <input type="range" min="1" max="9" step="0.5" value={d.score} onChange={e=>s('score',e.target.value)} style={{ width:'100%' }} />
+            </div>
+          </>
+        )}
+
+        {type==='health' && (
+          <>
+            <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+              <div className="field"><label className="label">Date</label><input className="input" type="date" value={d.date} onChange={e=>s('date',e.target.value)} /></div>
+              <div className="field"><label className="label">Type</label><select className="select" value={d.record_type} onChange={e=>s('record_type',e.target.value)}>{['vaccination','treatment','vet','repro'].map(t=><option key={t} value={t}>{t}</option>)}</select></div>
+            </div>
+            <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
+              <div className="field"><label className="label">Product</label><input className="input" value={d.product} onChange={e=>s('product',e.target.value)} placeholder="e.g. Vision 7" /></div>
+              <div className="field"><label className="label">Dose</label><input className="input" value={d.dose} onChange={e=>s('dose',e.target.value)} placeholder="e.g. 2cc" /></div>
+            </div>
+            <div className="field" style={{ marginBottom:'0.75rem' }}><label className="label">Condition / Reason</label><input className="input" value={d.condition} onChange={e=>s('condition',e.target.value)} /></div>
+            <div className="grid-2" style={{ marginBottom:'1rem' }}>
+              <div className="field"><label className="label">Withdrawal Until</label><input className="input" type="date" value={d.withdrawal_date} onChange={e=>s('withdrawal_date',e.target.value)} /></div>
+              <div className="field"><label className="label">Next Due</label><input className="input" type="date" value={d.next_due_date} onChange={e=>s('next_due_date',e.target.value)} /></div>
+            </div>
+          </>
+        )}
+
+        <div className="flex gap-1">
+          <button className="btn btn-primary" onClick={handleSave}>✓ Save</button>
+          <button className="btn btn-secondary" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  )
 }
