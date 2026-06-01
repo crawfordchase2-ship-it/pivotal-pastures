@@ -14,7 +14,7 @@ import SettingsTab      from './components/SettingsTab'
 import AnimalsTab       from './components/AnimalsTab'
 
 // ── App version ──────────────────────────────────────────────────────────────
-const APP_VERSION = 'v3.15'
+const APP_VERSION = 'v3.16'
 
 const TABS = [
   { id: 'dashboard', label: 'Dashboard', icon: '🏠' },
