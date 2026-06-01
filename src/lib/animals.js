@@ -36,11 +36,43 @@ export function suggestNextTag(existingTags, birthYear) {
 
 // ── Animal classes & sexes ──────────────────────────────────────────────────────
 export const SEXES = {
-  cow:     { label: 'Cow',     icon: '🐄', breeding: true,  intakePct: 2.0 },
-  bull:    { label: 'Bull',    icon: '🐂', breeding: true,  intakePct: 1.8 },
-  heifer:  { label: 'Heifer',  icon: '🐄', breeding: true,  intakePct: 2.8 },
-  steer:   { label: 'Steer',   icon: '🐃', breeding: false, intakePct: 2.8 },
-  calf:    { label: 'Calf',    icon: '🐮', breeding: false, intakePct: 0 }, // age-based
+  cow:          { label: 'Cow',          icon: '🐄', breeding: true,  intakePct: 2.0, isCalf: false },
+  bull:         { label: 'Bull',         icon: '🐂', breeding: true,  intakePct: 1.8, isCalf: false },
+  heifer:       { label: 'Heifer',       icon: '🐄', breeding: true,  intakePct: 2.8, isCalf: false },
+  steer:        { label: 'Steer',        icon: '🐃', breeding: false, intakePct: 2.8, isCalf: false },
+  calf:         { label: 'Calf',         icon: '🐮', breeding: false, intakePct: 0,   isCalf: true }, // legacy/unknown
+  bull_calf:    { label: 'Bull Calf',    icon: '🐮', breeding: false, intakePct: 0,   isCalf: true },
+  heifer_calf:  { label: 'Heifer Calf',  icon: '🐮', breeding: false, intakePct: 0,   isCalf: true },
+  steer_calf:   { label: 'Steer Calf',   icon: '🐮', breeding: false, intakePct: 0,   isCalf: true },
+}
+
+// Which sexes are calf-stage (use age-based intake)
+export const CALF_SEXES = ['calf', 'bull_calf', 'heifer_calf', 'steer_calf']
+export function isCalfSex(sex) { return CALF_SEXES.includes(sex) }
+
+// Promotion suggestion: what a calf becomes at weaning
+export const PROMOTION_MAP = {
+  bull_calf:   ['bull', 'steer'],   // you choose: keep intact or castrate
+  heifer_calf: ['heifer'],
+  steer_calf:  ['steer'],
+  calf:        ['heifer', 'steer', 'bull'],  // unknown — pick any
+}
+
+export const WEANING_AGE_DAYS = 205
+
+// Should this calf be suggested for promotion?
+export function promotionSuggestion(animal, asOf = new Date()) {
+  if (!isCalfSex(animal.sex)) return null
+  if (!animal.birth_date) return null
+  const age = Math.floor((new Date(asOf) - new Date(animal.birth_date)) / 86400000)
+  if (age < WEANING_AGE_DAYS) return null
+  const options = PROMOTION_MAP[animal.sex] || ['heifer', 'steer', 'bull']
+  return {
+    age,
+    fromLabel: SEXES[animal.sex].label,
+    options,                      // array of sex keys to promote to
+    optionLabels: options.map(o => SEXES[o].label),
+  }
 }
 
 export const STATUSES = {
@@ -205,7 +237,7 @@ export function calcLiveHerdMetrics(animals, weightRecordsByAnimal, asOf = new D
     const records = weightRecordsByAnimal[animal.id] || []
     let weight = currentWeight(animal, records, asOf)
 
-    if (animal.sex === 'calf') {
+    if (isCalfSex(animal.sex)) {
       const age = ageInDays(animal.birth_date, asOf)
       weight = weight || estimateCalfWeight(animal.birth_weight, age, 2.0)
       const rate = calfIntakeRate(age)
@@ -305,7 +337,7 @@ export function upcomingVaccinations(healthRecords, asOf = new Date(), daysAhead
 // ── Year-over-year calf performance ───────────────────────────────────────────────
 export function calfPerformanceByYear(animals, weightRecordsByAnimal) {
   const byYear = {}
-  animals.filter(a => a.sex === 'calf' || a.birth_date).forEach(animal => {
+  animals.filter(a => isCalfSex(a.sex) || a.birth_date).forEach(animal => {
     if (!animal.birth_date) return
     const year = new Date(animal.birth_date).getFullYear()
     if (!byYear[year]) byYear[year] = { births: [], weanings: [], adgs: [] }
