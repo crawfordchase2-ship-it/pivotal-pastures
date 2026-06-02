@@ -6,7 +6,7 @@ import { checkSafetyAlerts, checkRecommendationUnlock, GRASS_TYPES, detectGrowth
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../hooks/useAuth'
 
-const APP_VERSION = 'v3.24'
+const APP_VERSION = 'v3.27'
 
 // ── Span selector ─────────────────────────────────────────────────────────────
 function SpanSelector({ spans, from, to, onChange }) {
@@ -115,21 +115,63 @@ export default function GrazingPlanTab() {
     ? (typeof selMachine.spans === 'string' ? JSON.parse(selMachine.spans) : selMachine.spans) || []
     : []
 
-  // Auto fetch sun times
+  // Auto-fetch REAL sunrise/sunset for the location + date from a free API.
+  // Returns true local clock time (handles timezone, DST, equation of time).
   useEffect(() => {
     if (!form.start_date) return
-    const go = (lat, lng) => {
+    let cancelled = false
+
+    // Convert a UTC ISO timestamp to local HH:MM in the browser's timezone
+    const toLocalHHMM = iso => {
+      const d = new Date(iso)
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`
+    }
+
+    // Offline fallback: rough solar calc with timezone offset applied
+    const fallback = (lat, lng) => {
       const d = new Date(form.start_date)
       const J = Math.floor((d - new Date(d.getFullYear(),0,0)) / 86400000)
       const dlt = 23.45 * Math.sin((360/365*(J-81)) * Math.PI/180)
       const ha  = Math.acos(-Math.tan(lat*Math.PI/180)*Math.tan(dlt*Math.PI/180)) * 180/Math.PI
-      const sr  = 12 - ha/15, ss = 12 + ha/15
-      const fmt = m => { const h=Math.floor(m),mn=Math.round((m-h)*60); return `${String(h).padStart(2,'0')}:${String(mn).padStart(2,'0')}` }
-      setForm(f => ({ ...f, sunrise_time: fmt(sr), sunset_time: fmt(ss) }))
+      // Solar times in hours (UTC-relative at this longitude)
+      const srSolar = 12 - ha/15, ssSolar = 12 + ha/15
+      // Apply longitude→time and the browser's timezone offset to get local clock time
+      const tzOffsetHrs = -new Date(form.start_date).getTimezoneOffset()/60   // e.g. CDT = -5
+      const lngHrs = lng/15
+      const srLocal = srSolar - lngHrs + tzOffsetHrs
+      const ssLocal = ssSolar - lngHrs + tzOffsetHrs
+      const fmtH = h => {
+        let total = Math.round(((h%24)+24)%24 * 60)
+        return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`
+      }
+      if (!cancelled) setForm(f => ({ ...f, sunrise_time: fmtH(srLocal), sunset_time: fmtH(ssLocal) }))
     }
+
+    const fetchSun = async (lat, lng) => {
+      try {
+        const url = `https://api.sunrise-sunset.org/json?lat=${lat}&lng=${lng}&date=${form.start_date}&formatted=0`
+        const res = await fetch(url)
+        const data = await res.json()
+        if (data?.status === 'OK' && !cancelled) {
+          setForm(f => ({ ...f,
+            sunrise_time: toLocalHHMM(data.results.sunrise),
+            sunset_time:  toLocalHHMM(data.results.sunset),
+          }))
+        } else {
+          fallback(lat, lng)
+        }
+      } catch {
+        fallback(lat, lng)
+      }
+    }
+
     navigator.geolocation
-      ? navigator.geolocation.getCurrentPosition(p => go(p.coords.latitude, p.coords.longitude), () => go(41.5, -99.5))
-      : go(41.5, -99.5)
+      ? navigator.geolocation.getCurrentPosition(
+          p => fetchSun(p.coords.latitude, p.coords.longitude),
+          () => fetchSun(40.6, -98.4))   // default: Inland, NE area
+      : fetchSun(40.6, -98.4)
+
+    return () => { cancelled = true }
   }, [form.start_date])
 
   // Resolve herd weight: live from animal records if assigned, else stored estimate
