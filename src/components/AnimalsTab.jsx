@@ -292,7 +292,7 @@ export default function AnimalsTab() {
         {/* Count diagnostic — helps find missing/miscounted animals */}
         <details className="card" style={{ marginBottom:'0.75rem' }}>
           <summary style={{ cursor:'pointer', fontSize:'0.78rem', color:'var(--grass)', fontFamily:'DM Mono, monospace' }}>
-            🔎 Count Check — total records: {animals.length}
+            🔎 Count Check — {animals.length} total records
           </summary>
           <div style={{ marginTop:'0.6rem', fontSize:'0.72rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace', lineHeight:1.7 }}>
             <div><strong style={{color:'var(--cream)'}}>By status:</strong> {Object.entries(byStatus).map(([s,n])=>`${s}: ${n}`).join('  ·  ')}</div>
@@ -302,9 +302,37 @@ export default function AnimalsTab() {
             )}
             {calvingsNoCalf.length > 0 && (
               <div style={{ color:'var(--gold)', marginTop:'0.4rem' }}>
-                ⚠ {calvingsNoCalf.length} calving record{calvingsNoCalf.length>1?'s':''} with no matching calf animal (calf tag blank or doesn't exist). These calvings logged on the cow but never created a calf record.
+                ⚠ {calvingsNoCalf.length} calving record{calvingsNoCalf.length>1?'s':''} with no matching calf animal.
               </div>
             )}
+
+            {/* Every calf-ish animal listed with status + herd, flagging non-counters */}
+            {(() => {
+              const calfish = animals.filter(a => isCalfSex(a.sex))
+              const activeCalves = calfish.filter(a => a.status === 'active')
+              const notCounted = calfish.filter(a => a.status !== 'active')
+              const noHerd = activeCalves.filter(a => !a.current_herd_id)
+              const herdName = id => herds.find(h=>h.id===id)?.name || '—'
+              return (
+                <div style={{ marginTop:'0.6rem', borderTop:'1px solid var(--bark2)', paddingTop:'0.5rem' }}>
+                  <div style={{ color:'var(--cream)' }}>Calf-type records: {calfish.length} total · {activeCalves.length} active</div>
+                  {notCounted.length > 0 && (
+                    <div style={{ color:'var(--alert)', marginTop:'0.3rem' }}>
+                      ⚠ {notCounted.length} calf record(s) NOT active (won't count): {notCounted.map(a=>`${a.tag} [${a.status}]`).join(', ')}
+                    </div>
+                  )}
+                  {noHerd.length > 0 && (
+                    <div style={{ color:'var(--gold)', marginTop:'0.3rem' }}>
+                      ⚠ {noHerd.length} active calf(s) with NO herd (counts in total, not in any herd): {noHerd.map(a=>a.tag).join(', ')}
+                    </div>
+                  )}
+                  <div style={{ color:'var(--subtext)', marginTop:'0.3rem', fontSize:'0.66rem' }}>
+                    Herd box counts only calves assigned to that herd. The Calves stat counts all active calves.
+                  </div>
+                </div>
+              )
+            })()}
+
             {dupTags.length===0 && calvingsNoCalf.length===0 && (
               <div style={{ color:'var(--grass)', marginTop:'0.4rem' }}>✓ No duplicate tags, no orphan calvings.</div>
             )}
