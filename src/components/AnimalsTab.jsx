@@ -194,6 +194,69 @@ export default function AnimalsTab() {
     catch(e) { alert('Error: ' + e.message) }
   }
 
+  // Export all animals to CSV, grouped by type
+  function exportCSV() {
+    const herdName = id => herds.find(h=>h.id===id)?.name || ''
+    const cols = ['Tag','Name','Sex','Breed','Composition','Status','Birth Date','Birth Wt','Current Wt','Dam','Sire','Herd','Lactating','Notes']
+    const esc = v => {
+      const s = (v==null?'':String(v))
+      return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s
+    }
+    const rowFor = a => {
+      const wr = weights.filter(w=>w.animal_id===a.id)
+      const wt = currentWeight(a, wr) || ''
+      const comp = a.breed_composition ? (typeof a.breed_composition==='string'?(()=>{try{return JSON.parse(a.breed_composition)}catch{return null}})():a.breed_composition) : null
+      return [
+        a.tag, a.name, SEXES[a.sex]?.label||a.sex, a.breed,
+        comp&&comp.length?compositionDisplay(comp):'', STATUSES[a.status]?.label||a.status,
+        a.birth_date||'', a.birth_weight||'', wt, a.dam_tag||'', a.sire_tag||'',
+        herdName(a.current_herd_id), a.lactating?'Yes':'', a.notes||'',
+      ].map(esc).join(',')
+    }
+
+    // Group by type in a sensible order
+    const groups = [
+      ['COWS', animals.filter(a=>a.sex==='cow')],
+      ['BULLS', animals.filter(a=>a.sex==='bull')],
+      ['HEIFERS', animals.filter(a=>a.sex==='heifer')],
+      ['STEERS', animals.filter(a=>a.sex==='steer')],
+      ['HEIFER CALVES', animals.filter(a=>a.sex==='heifer_calf')],
+      ['BULL CALVES', animals.filter(a=>a.sex==='bull_calf')],
+      ['STEER CALVES', animals.filter(a=>a.sex==='steer_calf')],
+      ['CALVES (unspecified)', animals.filter(a=>a.sex==='calf')],
+    ]
+
+    const lines = []
+    lines.push(`Pivotal Pastures — Animal Records Export,${new Date().toLocaleDateString()}`)
+    lines.push('')
+    groups.forEach(([label, list]) => {
+      if (list.length === 0) return
+      const active = list.filter(a=>a.status==='active').length
+      lines.push(`${label} (${list.length} total, ${active} active)`)
+      lines.push(cols.join(','))
+      // sort by tag, numeric-aware
+      const sorted = [...list].sort((a,b)=>(a.tag||'').localeCompare(b.tag||'', undefined, {numeric:true}))
+      sorted.forEach(a => lines.push(rowFor(a)))
+      lines.push('')
+    })
+    // Summary footer
+    lines.push('SUMMARY')
+    lines.push('Type,Total,Active')
+    groups.forEach(([label,list])=>{ if(list.length) lines.push(`${label},${list.length},${list.filter(a=>a.status==='active').length}`) })
+    lines.push(`ALL,${animals.length},${animals.filter(a=>a.status==='active').length}`)
+
+    const csv = lines.join('\n')
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `pivotal-pastures-animals-${new Date().toISOString().slice(0,10)}.csv`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
   function toggleSelect(id) {
     setSelectedIds(prev => {
       const next = new Set(prev)
@@ -242,8 +305,15 @@ export default function AnimalsTab() {
 
     return (
       <div>
-        <div className="section-heading">Animal Records</div>
-        <div className="section-desc">Individual records from birth to exit. Breeding, weights, health, and pedigree — building value every year.</div>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:8 }}>
+          <div>
+            <div className="section-heading">Animal Records</div>
+            <div className="section-desc">Individual records from birth to exit. Breeding, weights, health, and pedigree — building value every year.</div>
+          </div>
+          {animals.length > 0 && (
+            <button className="btn btn-secondary btn-sm" onClick={exportCSV} style={{ flexShrink:0, marginTop:4 }}>⤓ Export CSV</button>
+          )}
+        </div>
 
         {/* Calving alerts */}
         {calvingAlerts.length > 0 && (
@@ -328,6 +398,22 @@ export default function AnimalsTab() {
                   )}
                   <div style={{ color:'var(--subtext)', marginTop:'0.3rem', fontSize:'0.66rem' }}>
                     Herd box counts only calves assigned to that herd. The Calves stat counts all active calves.
+                  </div>
+                  <div style={{ marginTop:'0.5rem', borderTop:'1px solid var(--bark2)', paddingTop:'0.5rem' }}>
+                    <div style={{ color:'var(--cream)', marginBottom:'0.3rem' }}>All calf tags (sorted) — compare to your sheet:</div>
+                    <div style={{ display:'flex', gap:5, flexWrap:'wrap' }}>
+                      {[...calfish].sort((a,b)=>(a.tag||'').localeCompare(b.tag||'', undefined, {numeric:true})).map(a=>(
+                        <span key={a.id} style={{
+                          background: a.status==='active'?'rgba(58,122,40,0.15)':'rgba(224,64,48,0.12)',
+                          borderRadius:5, padding:'2px 7px', fontSize:'0.62rem', fontFamily:'DM Mono, monospace',
+                          color: a.status==='active'?'var(--grass)':'var(--alert)',
+                          border:`1px solid ${a.status==='active'?'var(--moss)':'rgba(224,64,48,0.3)'}`,
+                        }}>{a.tag||'(no tag)'}{a.status!=='active'?' ✝':''}</span>
+                      ))}
+                    </div>
+                    <div style={{ color:'var(--subtext)', marginTop:'0.3rem', fontSize:'0.62rem' }}>
+                      Green = active, red ✝ = dead. {calfish.length} calf tags shown. Scan for the one on your sheet that's not here.
+                    </div>
                   </div>
                 </div>
               )
