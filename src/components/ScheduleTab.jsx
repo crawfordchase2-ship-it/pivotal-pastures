@@ -69,8 +69,15 @@ export default function ScheduleTab() {
   useEffect(() => { setCustomMoves(null) }, [activePlan?.id])
 
   // Sun times from plan or default
-  const sunrise = activePlan?.sunrise_time || '06:00'
-  const sunset  = activePlan?.sunset_time  || '20:30'
+  // Guard only against truly invalid stored times (sunset at/before sunrise).
+  // Real sun times (e.g. 5:55 AM / 8:50 PM) pass through unchanged.
+  const toM = t => { if(!t) return null; const [h,m]=t.split(':').map(Number); return h*60+m }
+  let sunrise = activePlan?.sunrise_time || '06:00'
+  let sunset  = activePlan?.sunset_time  || '20:30'
+  const srM = toM(sunrise), ssM = toM(sunset)
+  if (srM == null || ssM == null || ssM <= srM) {
+    sunrise = '06:00'; sunset = '20:30'   // only when window is broken
+  }
   const runtime = passCalc?.runtimeMinutes || 30
 
   const baseSchedule = passCalc
