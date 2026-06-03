@@ -485,3 +485,25 @@ export function runSimulation({ machine, herd, plan, passes, forageDmPerAcre, re
 
   return results;
 }
+
+
+// ─── Linear travel direction from start→end pins ──────────────────────────────
+export function travelDirection(startLat, startLng, endLat, endLng) {
+  if (startLat == null || endLat == null) return null
+  const dLat = endLat - startLat
+  const dLng = endLng - startLng
+  // Dominant axis
+  if (Math.abs(dLat) >= Math.abs(dLng)) {
+    return dLat >= 0 ? 'South → North' : 'North → South'
+  }
+  return dLng >= 0 ? 'West → East' : 'East → West'
+}
+
+// Perpendicular compass options for span 1 (across the travel direction)
+export function spanAxisEnds(startLat, startLng, endLat, endLng) {
+  const dir = travelDirection(startLat, startLng, endLat, endLng)
+  if (!dir) return ['north', 'south']
+  // If traveling N-S, spans run E-W; if traveling E-W, spans run N-S
+  if (dir.includes('North') || dir.includes('South')) return ['west', 'east']
+  return ['north', 'south']
+}
