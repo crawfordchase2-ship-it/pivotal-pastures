@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import {
   useAnimals, useBreedingRecords, useWeightRecords, useBcsRecords, useHealthRecords, useHerds, useMachines,
 } from '../hooks/useData'
@@ -45,26 +45,65 @@ export default function AnimalsTab() {
   const [form, setForm] = useState(emptyAnimal)
   const set = (k,v) => setForm(f => ({...f,[k]:v}))
 
-  // Breed composition handlers
+  // Breed composition handlers — auto-split evenly when adding/removing breeds
   const comp = form.breed_composition || []
-  const addCompRow = () => setForm(f => ({...f, breed_composition:[...(f.breed_composition||[]), {breed:'South Poll', pct:0}]}))
+  // Even split: n breeds → 100/n each, last row absorbs rounding so total = 100
+  const evenSplit = rows => {
+    const n = rows.length
+    if (n === 0) return []
+    const each = Math.floor((100 / n) * 10) / 10        // one decimal, e.g. 33.3
+    return rows.map((r, i) => ({
+      ...r,
+      pct: i === n - 1 ? +(100 - each * (n - 1)).toFixed(1) : each,
+    }))
+  }
+  const addCompRow = () => setForm(f => {
+    const rows = [...(f.breed_composition||[]), {breed:'South Poll', pct:0}]
+    return {...f, breed_composition: evenSplit(rows)}
+  })
   const updateCompRow = (i,k,v) => setForm(f => ({...f, breed_composition:(f.breed_composition||[]).map((r,idx)=>idx===i?{...r,[k]:k==='pct'?(parseFloat(v)||0):v}:r)}))
-  const removeCompRow = (i) => setForm(f => ({...f, breed_composition:(f.breed_composition||[]).filter((_,idx)=>idx!==i)}))
+  const removeCompRow = (i) => setForm(f => {
+    const rows = (f.breed_composition||[]).filter((_,idx)=>idx!==i)
+    // re-balance evenly after removal
+    return {...f, breed_composition: evenSplit(rows)}
+  })
   const compTotal = compositionTotal(comp)
 
-  // Suggest calf composition from parents
-  function suggestCalfComposition() {
+  // Compute calf composition from current dam/sire tags
+  function calcFromParents() {
     const dam = animals.find(a => a.tag === form.dam_tag)
     const sire = animals.find(a => a.tag === form.sire_tag)
     const damComp = dam?.breed_composition ? (typeof dam.breed_composition==='string'?JSON.parse(dam.breed_composition):dam.breed_composition) : (dam?.breed?[{breed:dam.breed,pct:100}]:null)
     const sireComp = sire?.breed_composition ? (typeof sire.breed_composition==='string'?JSON.parse(sire.breed_composition):sire.breed_composition) : (sire?.breed?[{breed:sire.breed,pct:100}]:null)
-    const suggested = calcCalfComposition(damComp, sireComp)
+    return calcCalfComposition(damComp, sireComp)
+  }
+
+  // Manual button — calc from parents, alert if not possible
+  function suggestCalfComposition() {
+    const suggested = calcFromParents()
     if (suggested) {
       setForm(f => ({...f, breed_composition: suggested, breed: suggested[0].breed}))
     } else {
       alert('Set breed composition on the dam and/or sire first to auto-calculate.')
     }
   }
+
+  // Auto-fill calf composition when BOTH parents are entered (new animals only).
+  // Tracks the last dam/sire we auto-filled for, so manual edits aren't clobbered
+  // unless a parent tag actually changes.
+  const autoFilledFor = useRef('')
+  useEffect(() => {
+    // Only when adding (no selId) and both parents present
+    if (selId) return
+    if (!form.dam_tag || !form.sire_tag) return
+    const key = `${form.dam_tag}|${form.sire_tag}`
+    if (autoFilledFor.current === key) return   // already handled this pair
+    const suggested = calcFromParents()
+    if (suggested) {
+      autoFilledFor.current = key
+      setForm(f => ({...f, breed_composition: suggested, breed: suggested[0].breed}))
+    }
+  }, [form.dam_tag, form.sire_tag, selId])
 
   const selAnimal = animals.find(a => a.id === selId)
 
