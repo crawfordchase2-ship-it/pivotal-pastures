@@ -518,6 +518,18 @@ export function compositionDisplay(composition, primaryBreed = null) {
   }).join(', ')
 }
 
+// Full breakdown in percentages: "50% South Poll, 50% Red Angus"
+export function compositionPercent(composition, primaryBreed = null) {
+  if (!composition || composition.length === 0) return primaryBreed || '—'
+  const sorted = [...composition].sort((a, b) => b.pct - a.pct)
+  if (sorted.length === 1 && Math.abs(sorted[0].pct - 100) < 0.5) return sorted[0].breed
+  return sorted.map(c => {
+    // Show whole numbers cleanly, one decimal only when needed
+    const pct = Math.abs(c.pct - Math.round(c.pct)) < 0.05 ? Math.round(c.pct) : +c.pct.toFixed(1)
+    return `${pct}% ${c.breed}`
+  }).join(', ')
+}
+
 // Short display — just the dominant breed + fraction
 export function compositionShort(composition, primaryBreed = null) {
   if (!composition || composition.length === 0) return primaryBreed || '—'
