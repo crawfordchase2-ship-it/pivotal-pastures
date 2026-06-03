@@ -9,7 +9,7 @@ import {
   cowBreedingSummary, getOffspring, getDam, getSire,
   withdrawalStatus, upcomingVaccinations, bcsTrend, bcsColor, BCS_LABELS,
   calfPerformanceByYear, compositionValid, compositionTotal, compositionDisplay,
-  compositionShort, calcCalfComposition, isCalfSex, promotionSuggestion, PROMOTION_MAP, CALF_SEXES,
+  compositionShort, compositionPercent, calcCalfComposition, isCalfSex, promotionSuggestion, PROMOTION_MAP, CALF_SEXES,
 } from '../lib/animals.js'
 
 const today = () => new Date().toISOString().slice(0,10)
@@ -827,6 +827,17 @@ export default function AnimalsTab() {
               </div>
             ))}
           </div>
+          {/* Full breed composition breakdown */}
+          {(() => {
+            const ac = a.breed_composition ? (typeof a.breed_composition==='string'?(()=>{try{return JSON.parse(a.breed_composition)}catch{return null}})():a.breed_composition) : null
+            if (!ac || ac.length <= 1) return null
+            return (
+              <div style={{ marginTop:'0.6rem', paddingTop:'0.6rem', borderTop:'1px solid var(--bark2)' }}>
+                <div style={{ fontSize:'0.6rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace', marginBottom:'0.3rem' }}>BREED COMPOSITION</div>
+                <div style={{ fontSize:'0.85rem', color:'var(--cream)' }}>{compositionPercent(ac, a.breed)}</div>
+              </div>
+            )
+          })()}
         </div>
 
         {/* Pedigree */}
