@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useMachines, useFieldPositions, useGrazingPlans } from '../hooks/useData'
-import { getEndTowerRadius } from '../lib/grazing'
+import { getEndTowerRadius, travelDirection, spanAxisEnds } from '../lib/grazing'
 
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
 
@@ -295,6 +295,25 @@ export default function FieldMapTab() {
     const perpLat = -dLng/len * widthDeg
     const perpLng =  dLat/len * widthDeg
 
+    // Span 1 marker — anchor at the chosen compass end of the span axis
+    const span1End = m.span1_end || 'north'
+    // The two ends of the span axis (perpendicular to travel), at the start of the run
+    const endA = { lat: start.lat + perpLat*2, lng: start.lng + perpLng*2 }
+    const endB = { lat: start.lat - perpLat*2, lng: start.lng - perpLng*2 }
+    // Pick whichever end matches the chosen compass direction
+    let span1Pos
+    if (span1End === 'north') span1Pos = endA.lat >= endB.lat ? endA : endB
+    else if (span1End === 'south') span1Pos = endA.lat <= endB.lat ? endA : endB
+    else if (span1End === 'east') span1Pos = endA.lng >= endB.lng ? endA : endB
+    else span1Pos = endA.lng <= endB.lng ? endA : endB   // west
+    const span1Marker = new window.google.maps.Marker({
+      position: span1Pos, map,
+      label: { text: 'S1', color: '#fff', fontSize: '10px', fontWeight: 'bold' },
+      icon: { path: window.google.maps.SymbolPath.CIRCLE, scale: 11, fillColor: '#2e6b1c', fillOpacity: 0.95, strokeColor: '#fff', strokeWeight: 2 },
+      title: `Span 1 (${span1End} end)`, zIndex: 28,
+    })
+    overlays.current.push(span1Marker)
+
     // Grazed rectangle (yellow) — start to current
     if (pct > 0.01) {
       const grazedRect = [
@@ -531,6 +550,35 @@ export default function FieldMapTab() {
                 )}
               </>
             )}
+          </div>
+
+          {/* Linear travel direction + Span 1 location */}
+          {!isPivot && selMachine?.start_lat && selMachine?.end_lat && (
+            <div style={{ background:'var(--bark)', borderRadius:8, padding:'0.7rem 0.85rem', marginBottom:'0.75rem' }}>
+              <div style={{ fontSize:'0.7rem', color:'var(--subtext)', fontFamily:'DM Mono, monospace', marginBottom:'0.5rem' }}>
+                TRAVEL DIRECTION: <span style={{ color:'var(--gold)' }}>{travelDirection(Number(selMachine.start_lat), Number(selMachine.start_lng), Number(selMachine.end_lat), Number(selMachine.end_lng))}</span>
+                <span style={{ marginLeft:8 }}>(machine rolls this way down the field)</span>
+              </div>
+              <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
+                <label className="label" style={{ margin:0 }}>Span 1 is at the:</label>
+                <select
+                  className="select"
+                  value={selMachine.span1_end || spanAxisEnds(Number(selMachine.start_lat), Number(selMachine.start_lng), Number(selMachine.end_lat), Number(selMachine.end_lng))[0]}
+                  onChange={async e => { await updateMachine(selMachine.id, { span1_end: e.target.value }); setSavedMsg('Span 1 end saved'); setTimeout(()=>setSavedMsg(''),2000) }}
+                  style={{ maxWidth:140 }}
+                >
+                  {spanAxisEnds(Number(selMachine.start_lat), Number(selMachine.start_lng), Number(selMachine.end_lat), Number(selMachine.end_lng)).map(end => (
+                    <option key={end} value={end}>{end.charAt(0).toUpperCase()+end.slice(1)} end</option>
+                  ))}
+                </select>
+                <span style={{ fontSize:'0.66rem', color:'var(--subtext)' }}>
+                  Spans run across the field; Span 1 anchors at this end, counting along the machine's length.
+                </span>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
 
             {/* Clear all */}
             {(hasBoundary || hasStart || hasEnd) && (
