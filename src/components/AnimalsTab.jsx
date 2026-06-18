@@ -4,7 +4,7 @@ import {
 } from '../hooks/useData'
 import {
   SEXES, STATUSES, BREEDS, yearToLetter, suggestNextTag,
-  expectedCalvingDate, calvingAlert, ageDisplay, ageInDays,
+  expectedCalvingDate, calvingAlert, daysUntilCalving, ageDisplay, ageInDays, effectiveLactating, isLactating,
   estimateCalfWeight, calcADG, latestWeight, currentWeight,
   cowBreedingSummary, getOffspring, getDam, getSire,
   withdrawalStatus, upcomingVaccinations, bcsTrend, bcsColor, BCS_LABELS,
@@ -39,7 +39,7 @@ export default function AnimalsTab() {
   const emptyAnimal = {
     tag: '', name: '', breed: 'Angus', sex: 'cow', color: '',
     birth_date: '', birth_weight: '', current_weight: '', sire_tag: '', dam_tag: '',
-    registration_number: '', status: 'active', lactating: false, notes: '', current_herd_id: '',
+    registration_number: '', status: 'active', lactating: false, lactating_override: '', notes: '', current_herd_id: '',
     breed_composition: [],
   }
   const [form, setForm] = useState(emptyAnimal)
@@ -149,6 +149,27 @@ export default function AnimalsTab() {
       .sort((a,b) => a.alert.days - b.alert.days)
   }, [breeding, animals])
 
+  // ALL bred cows still to calve (no actual calving recorded), sorted by due date.
+  // Keeps only the most recent breeding record per cow so re-breds don't double-list.
+  const toCalve = useMemo(() => {
+    const open = breeding.filter(b => b.bred_date && !b.actual_calving_date)
+    // most recent bred_date per animal
+    const latestByAnimal = {}
+    open.forEach(b => {
+      const cur = latestByAnimal[b.animal_id]
+      if (!cur || new Date(b.bred_date) > new Date(cur.bred_date)) latestByAnimal[b.animal_id] = b
+    })
+    return Object.values(latestByAnimal)
+      .map(b => {
+        const animal = animals.find(a => a.id === b.animal_id)
+        const due = expectedCalvingDate(b.bred_date)
+        const days = daysUntilCalving(b.bred_date)
+        return { animal, breeding: b, due, days }
+      })
+      .filter(x => x.animal && x.animal.status === 'active')
+      .sort((a,b) => a.days - b.days)   // soonest/overdue first
+  }, [breeding, animals])
+
   async function saveAnimal() {
     if (!form.tag.trim()) { alert('Tag is required'); return }
     setSaving(true)
@@ -189,7 +210,7 @@ export default function AnimalsTab() {
       tag:a.tag, name:a.name||'', breed:a.breed||'Angus', sex:a.sex,
       color:a.color||'', birth_date:a.birth_date||'', birth_weight:a.birth_weight||'', current_weight:'',
       sire_tag:a.sire_tag||'', dam_tag:a.dam_tag||'', registration_number:a.registration_number||'',
-      status:a.status, lactating:a.lactating||false, notes:a.notes||'', current_herd_id:a.current_herd_id||'',
+      status:a.status, lactating:a.lactating||false, lactating_override:a.lactating_override||'', notes:a.notes||'', current_herd_id:a.current_herd_id||'',
       breed_composition: a.breed_composition ? (typeof a.breed_composition==='string'?JSON.parse(a.breed_composition):a.breed_composition) : [],
     })
     setSelId(a.id); setView('add'); window.scrollTo(0,0)
@@ -314,6 +335,34 @@ export default function AnimalsTab() {
     } catch(e) { alert('Error: ' + e.message) }
   }
 
+  // Wean a group of calves at once → their dams auto-switch to dry
+  async function bulkWean() {
+    if (selectedIds.size === 0) { alert('Select calves first'); return }
+    const calfIds = [...selectedIds].filter(id => {
+      const a = animals.find(x => x.id === id)
+      return a && isCalfSex(a.sex)
+    })
+    if (calfIds.length === 0) { alert('None of the selected animals are calves.'); return }
+    if (!confirm(`Wean ${calfIds.length} calf/calves? Their dams will switch to dry.`)) return
+    try {
+      for (const id of calfIds) {
+        await updateAnimal(id, { weaned: true, weaned_date: today() })
+      }
+      setSelectedIds(new Set()); setSelectMode(false)
+    } catch(e) { alert('Error: ' + e.message) }
+  }
+
+  async function bulkUnwean() {
+    if (selectedIds.size === 0) return
+    try {
+      for (const id of selectedIds) {
+        const a = animals.find(x => x.id === id)
+        if (a && isCalfSex(a.sex)) await updateAnimal(id, { weaned: false, weaned_date: null })
+      }
+      setSelectedIds(new Set()); setSelectMode(false)
+    } catch(e) { alert('Error: ' + e.message) }
+  }
+
   function startAdd(presetSex) {
     const sex = presetSex || 'cow'
     const birthYear = ['calf','bull_calf','heifer_calf','steer_calf'].includes(sex) ? curYear : curYear - 2
@@ -369,6 +418,35 @@ export default function AnimalsTab() {
               </div>
             ))}
           </div>
+        )}
+
+        {/* Still to calve — full list of bred cows with no calving yet */}
+        {toCalve.length > 0 && (
+          <details className="card" style={{ border:'1px solid var(--sky)', background:'rgba(74,144,200,0.05)' }}>
+            <summary style={{ cursor:'pointer', color:'var(--sky)', fontFamily:'DM Mono, monospace', fontSize:'0.82rem', fontWeight:600 }}>
+              🤰 Still to Calve — {toCalve.length} bred {toCalve.length===1?'cow':'cows'}
+            </summary>
+            <div style={{ marginTop:'0.6rem' }}>
+              {toCalve.map((x,i) => {
+                const overdue = x.days < 0
+                const soon = x.days >= 0 && x.days <= 14
+                const color = overdue ? 'var(--alert)' : soon ? 'var(--gold)' : 'var(--subtext)'
+                return (
+                  <div key={i} className="list-item" style={{ cursor:'pointer' }} onClick={()=>{setSelId(x.animal.id);setView('detail')}}>
+                    <div>
+                      <span style={{ fontFamily:'DM Mono, monospace', color:'var(--cream)', fontWeight:600 }}>{x.animal.tag}</span>
+                      {x.animal.name && <span style={{ color:'var(--subtext)', marginLeft:6 }}>{x.animal.name}</span>}
+                      <div style={{ fontSize:'0.72rem', color, marginTop:2 }}>
+                        due {x.due}
+                        {overdue ? ` · ${Math.abs(x.days)}d overdue` : x.days===0 ? ' · due today' : ` · in ${x.days}d`}
+                      </div>
+                    </div>
+                    <span style={{ color, fontSize:'0.7rem', fontFamily:'DM Mono, monospace' }}>{overdue?'OVERDUE':soon?'SOON':''}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </details>
         )}
 
         {/* Promotions due */}
@@ -489,6 +567,12 @@ export default function AnimalsTab() {
               <button className="btn btn-primary btn-sm" onClick={bulkMoveToHerd} disabled={selectedIds.size===0}>
                 Move {selectedIds.size>0?selectedIds.size:''}
               </button>
+              <button className="btn btn-secondary btn-sm" onClick={bulkWean} disabled={selectedIds.size===0} title="Mark selected calves weaned — dams switch to dry">
+                🍼 Wean {selectedIds.size>0?selectedIds.size:''}
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={bulkUnwean} disabled={selectedIds.size===0} title="Undo weaning">
+                ↩ Un-wean
+              </button>
             </>
           )}
         </div>
@@ -540,7 +624,8 @@ export default function AnimalsTab() {
                   {a.name && <span style={{ color:'var(--subtext)' }}>{a.name}</span>}
                   <span className="badge">{sexInfo.label}</span>
                   {a.status!=='active' && <span className="badge" style={{ borderColor:STATUSES[a.status]?.color, color:STATUSES[a.status]?.color }}>{a.status}</span>}
-                  {a.lactating && <span className="badge" style={{ borderColor:'var(--sky)', color:'var(--sky)' }}>lactating</span>}
+                  {(a.sex==='cow'||a.sex==='heifer') && effectiveLactating(a, animals) && <span className="badge" style={{ borderColor:'var(--sky)', color:'var(--sky)' }}>lactating</span>}
+                  {isCalfSex(a.sex) && a.weaned && <span className="badge" style={{ borderColor:'var(--subtext)', color:'var(--subtext)' }}>weaned</span>}
                   {pendingCalving && (pendingCalving.level==='alert'||pendingCalving.level==='overdue'||pendingCalving.level==='due') &&
                     <span className="badge" style={{ borderColor:'var(--gold)', color:'var(--gold)' }}>🐮 {pendingCalving.days<=0?'due':pendingCalving.days+'d'}</span>}
                 </div>
@@ -731,11 +816,13 @@ export default function AnimalsTab() {
           <div className="grid-2" style={{ marginBottom:'0.75rem' }}>
             {(form.sex==='cow'||form.sex==='heifer') && (
               <div className="field">
-                <label className="label">Lactating?</label>
-                <select className="select" value={form.lactating?'yes':'no'} onChange={e=>set('lactating',e.target.value==='yes')}>
-                  <option value="no">No</option>
-                  <option value="yes">Yes — nursing calf</option>
+                <label className="label">Lactation</label>
+                <select className="select" value={form.lactating_override||'auto'} onChange={e=>set('lactating_override', e.target.value==='auto'?'':e.target.value)}>
+                  <option value="auto">Auto (calf at side = lactating)</option>
+                  <option value="yes">Force lactating</option>
+                  <option value="no">Force dry</option>
                 </select>
+                <div style={{ fontSize:'0.6rem', color:'var(--subtext)', marginTop:3 }}>Auto detects from her calves.</div>
               </div>
             )}
           </div>
@@ -779,8 +866,19 @@ export default function AnimalsTab() {
           <span style={{ fontSize:'1.4rem' }}>{sexInfo.icon}</span>
           <div className="section-heading" style={{ fontSize:'1.3rem', margin:0, fontFamily:'DM Mono, monospace' }}>{a.tag}</div>
           {a.name && <span style={{ color:'var(--subtext)', fontFamily:'Satisfy, cursive', fontSize:'1.2rem' }}>{a.name}</span>}
-          <button className="btn btn-secondary btn-sm" style={{ marginLeft:'auto' }} onClick={()=>openEdit(a)}>✎ Edit</button>
+          {(a.sex==='cow'||a.sex==='heifer') && (
+            <button className="btn btn-primary btn-sm" style={{ marginLeft:'auto' }} onClick={()=>setSubForm('breeding')}>🐮 Record Calving</button>
+          )}
+          <button className="btn btn-secondary btn-sm" style={{ marginLeft:(a.sex==='cow'||a.sex==='heifer')?0:'auto' }} onClick={()=>openEdit(a)}>✎ Edit</button>
         </div>
+
+        {(a.sex==='cow'||a.sex==='heifer') && (
+          <div style={{ fontSize:'0.78rem', marginBottom:'0.75rem', color: isLactating(a, animals)?'var(--sky)':'var(--subtext)' }}>
+            {isLactating(a, animals)
+              ? '🍼 Lactating — has a calf at side (switches to dry when the calf is weaned)'
+              : '○ Dry — no nursing calf'}
+          </div>
+        )}
 
         {/* Withdrawal warning */}
         {wd && !wd.clear && (
