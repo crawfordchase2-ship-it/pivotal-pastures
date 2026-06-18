@@ -233,7 +233,8 @@ export const DEFAULT_WEIGHTS = {
   calf: 300, bull_calf: 300, heifer_calf: 300, steer_calf: 300,
 }
 
-export function calcLiveHerdMetrics(animals, weightRecordsByAnimal, asOf = new Date()) {
+export function calcLiveHerdMetrics(animals, weightRecordsByAnimal, asOf = new Date(), allAnimals = null) {
+  const roster = allAnimals || animals
   let totalLW = 0
   let totalDM = 0
   let headCount = 0
@@ -257,7 +258,7 @@ export function calcLiveHerdMetrics(animals, weightRecordsByAnimal, asOf = new D
     } else {
       const sexInfo = SEXES[animal.sex] || SEXES.cow
       let rate = sexInfo.intakePct / 100
-      if (animal.sex === 'cow' && animal.lactating) rate = 0.031
+      if ((animal.sex === 'cow' || animal.sex === 'heifer') && effectiveLactating(animal, roster)) rate = 0.031
       if (!weight) {
         weight = DEFAULT_WEIGHTS[animal.sex] || 1000
         isEstimate = true
@@ -443,7 +444,7 @@ export function herdMetricsFromAnimals(herdId, allAnimals, weightRecordsByAnimal
   const assigned = animalsInHerd(herdId, allAnimals)
   if (assigned.length === 0) return null   // fall back to class counts
 
-  const metrics = calcLiveHerdMetrics(assigned, weightRecordsByAnimal, asOf)
+  const metrics = calcLiveHerdMetrics(assigned, weightRecordsByAnimal, asOf, allAnimals)
   return {
     ...metrics,
     source: 'records',          // vs 'estimated'
@@ -585,4 +586,28 @@ export function herdAvgComposition(animals) {
   return Object.entries(blend)
     .map(([breed, total]) => ({ breed, pct: +(total / counted).toFixed(1) }))
     .sort((a, b) => b.pct - a.pct)
+}
+
+
+// ─── Auto-detect lactation (weaning-based, no age cutoff) ────────────────────────
+// A cow is lactating if she has a LIVE calf at side that has NOT been weaned.
+// She stays lactating until the calf is actively marked weaned.
+export function isLactating(cow, allAnimals) {
+  if (!cow || (cow.sex !== 'cow' && cow.sex !== 'heifer')) return false
+  const calves = (allAnimals || []).filter(a =>
+    a.dam_tag === cow.tag &&
+    a.status === 'active' &&
+    isCalfSex(a.sex) &&
+    !a.weaned
+  )
+  return calves.length > 0
+}
+
+// Effective lactating state: auto-detect, but a manual override wins if set.
+// cow.lactating_override can be 'yes' | 'no' | '' (auto)
+export function effectiveLactating(cow, allAnimals) {
+  if (!cow) return false
+  if (cow.lactating_override === 'yes') return true
+  if (cow.lactating_override === 'no') return false
+  return isLactating(cow, allAnimals)
 }
